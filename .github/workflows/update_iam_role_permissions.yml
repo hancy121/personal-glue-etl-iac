@@ -1,11 +1,7 @@
 name: Add IAM Permissions (Non-Destructive)
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/update_iam_role_permissions.yml"
+  workflow_dispatch:
 
 permissions:
   id-token: write
@@ -14,48 +10,26 @@ permissions:
 env:
   AWS_REGION: us-east-2
   AWS_ACCOUNT_ID: "493272324412"
-
-  PROD_GITHUB_OIDC_ROLE: personal-prod-github-oidc-role
-
-  ROLE_NAME: personal-prod-traffic-shap-agent-role
+  GITHUB_AWS_ROLE: github-ecr-role
+  ROLE_NAME: practice-traffic-shap-agent-role
 
 jobs:
   update-role:
     runs-on: ubuntu-latest
 
     steps:
-
-      # ---------------------------------------
-      # CHECKOUT
-      # ---------------------------------------
-
       - name: Checkout
         uses: actions/checkout@v4
-
-
-      # ---------------------------------------
-      # OIDC AUTH
-      # ---------------------------------------
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ env.PROD_GITHUB_OIDC_ROLE }}
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ env.GITHUB_AWS_ROLE }}
           aws-region: ${{ env.AWS_REGION }}
-
-
-      # ---------------------------------------
-      # VERIFY IDENTITY
-      # ---------------------------------------
 
       - name: Verify Identity
         run: |
           aws sts get-caller-identity
-
-
-      # ---------------------------------------
-      # GET EXISTING INLINE POLICY
-      # ---------------------------------------
 
       - name: Fetch existing policy
         run: |
@@ -63,20 +37,14 @@ jobs:
             --role-name "$ROLE_NAME" \
             --policy-name glue-job-inline-policy \
             --query 'PolicyDocument' \
-            --output json > existing-policy.json \
-            || echo '{}' > existing-policy.json
+            --output json > existing-policy.json || echo '{}' > existing-policy.json
 
           echo "===== EXISTING POLICY ====="
           cat existing-policy.json
 
-
-      # ---------------------------------------
-      # CREATE NEW PERMISSIONS
-      # ---------------------------------------
-
-      - name: Create new permissions
+      - name: Append practice permissions
         run: |
-          cat <<EOF > new-permission.json
+          cat > new-permission.json <<'EOF'
           [
             {
               "Effect": "Allow",
@@ -85,8 +53,8 @@ jobs:
                 "s3:ListBucket"
               ],
               "Resource": [
-                "arn:aws:s3:::analytics-ea-ds-dev",
-                "arn:aws:s3:::analytics-ea-ds-dev/*"
+                "arn:aws:s3:::practice-analytics-ea-ds-dev",
+                "arn:aws:s3:::practice-analytics-ea-ds-dev/*"
               ]
             },
             {
@@ -96,8 +64,8 @@ jobs:
                 "s3:ListBucket"
               ],
               "Resource": [
-                "arn:aws:s3:::analytics-ea-ds-pricing",
-                "arn:aws:s3:::analytics-ea-ds-pricing/*"
+                "arn:aws:s3:::practice-analytics-ea-ds-pricing",
+                "arn:aws:s3:::practice-analytics-ea-ds-pricing/*"
               ]
             },
             {
@@ -110,15 +78,6 @@ jobs:
           ]
           EOF
 
-          cat new-permission.json
-
-
-      # ---------------------------------------
-      # MERGE EXISTING + NEW PERMISSIONS
-      # ---------------------------------------
-
-      - name: Merge permissions
-        run: |
           jq '
             if .Statement == null then
               {
@@ -133,23 +92,23 @@ jobs:
           echo "===== UPDATED POLICY ====="
           cat updated-policy.json
 
-
-      # ---------------------------------------
-      # APPLY POLICY
-      # ---------------------------------------
-
-      - name: Apply updated policy
+      - name: Update inline policy
         run: |
           aws iam put-role-policy \
             --role-name "$ROLE_NAME" \
             --policy-name glue-job-inline-policy \
             --policy-document file://updated-policy.json
 
+          echo "Permissions updated successfully."
 
-      # ---------------------------------------
-      # DONE
-      # ---------------------------------------
-
-      - name: Done
+      - name: Verify final policy
         run: |
-          echo "Added permissions without modifying trust relationships."
+          echo "===== FINAL POLICY ====="
+
+          aws iam get-role-policy \
+            --role-name "$ROLE_NAME" \
+            --policy-name glue-job-inline-policy \
+            --query 'PolicyDocument' \
+            --output json
+
+          echo "===== UPDATE COMPLETE ====="
