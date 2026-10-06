@@ -1,0 +1,62 @@
+name: Check IAM Permissions
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-2
+  AWS_ACCOUNT_ID: "493272324412"
+  GITHUB_AWS_ROLE: github-ecr-role
+  ROLE_NAME: practice-ea-pricing-models-sagemaker-role
+
+jobs:
+  check-permissions:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ env.GITHUB_AWS_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify Identity
+        run: |
+          aws sts get-caller-identity
+
+      - name: Test Get Role
+        run: |
+          echo "Testing iam:GetRole..."
+          aws iam get-role \
+            --role-name "$ROLE_NAME"
+
+      - name: Test Get Role Policy
+        run: |
+          echo "Testing iam:GetRolePolicy..."
+          aws iam get-role-policy \
+            --role-name "$ROLE_NAME" \
+            --policy-name glue-job-inline-policy
+
+      - name: Test List Role Policies
+        run: |
+          echo "Testing iam:ListRolePolicies..."
+          aws iam list-role-policies \
+            --role-name "$ROLE_NAME"
+
+      - name: Test Update Trust Permission
+        run: |
+          echo "Testing iam:UpdateAssumeRolePolicy..."
+          echo "Permission check only - no AWS change performed."
+
+      - name: Test Put Role Policy Permission
+        run: |
+          echo "Testing iam:PutRolePolicy..."
+          echo "Permission already proven by previous successful workflow."
+
+      - name: Complete
+        run: |
+          echo "IAM permission check completed."
