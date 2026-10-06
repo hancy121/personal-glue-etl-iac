@@ -1,11 +1,7 @@
 name: Create Glue IAM Role
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/create_iam_role.yml"
+  workflow_dispatch:
 
 permissions:
   id-token: write
@@ -14,58 +10,35 @@ permissions:
 env:
   AWS_REGION: us-east-2
   AWS_ACCOUNT_ID: "493272324412"
-
-  # Existing GitHub OIDC deployment role
-  PROD_GITHUB_OIDC_ROLE: personal-prod-github-oidc-role
-
-  # Role that will be created
-  PROD_LAMBDA_ROLE_NAME: personal-prod-pricing-models-lambda-role
+  GITHUB_AWS_ROLE: github-ecr-role
+  ROLE_NAME: practice-ea-pricing-models-lambda-role
 
 jobs:
   create-role:
     runs-on: ubuntu-latest
 
     steps:
-
-      # ---------------------------------------
-      # DEBUG
-      # ---------------------------------------
-
       - name: Debug context
         run: |
           echo "Repo: $GITHUB_REPOSITORY"
           echo "Ref: $GITHUB_REF"
-          echo "Account: $AWS_ACCOUNT_ID"
-          echo "Region: $AWS_REGION"
-
-
-      # ---------------------------------------
-      # OIDC AUTH
-      # ---------------------------------------
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ env.PROD_GITHUB_OIDC_ROLE }}
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ env.GITHUB_AWS_ROLE }}
           aws-region: ${{ env.AWS_REGION }}
-
-
-      # ---------------------------------------
-      # VERIFY AWS IDENTITY
-      # ---------------------------------------
 
       - name: Verify Identity
         run: |
           aws sts get-caller-identity
 
-
-      # ---------------------------------------
+      # ---------------------------
       # CREATE TRUST POLICY
-      # ---------------------------------------
-
+      # ---------------------------
       - name: Create trust policy
         run: |
-          cat <<EOF > trust-policy.json
+          cat > trust-policy.json <<'EOF'
           {
             "Version": "2012-10-17",
             "Statement": [
@@ -82,26 +55,32 @@ jobs:
 
           cat trust-policy.json
 
-
-      # ---------------------------------------
+      # ---------------------------
       # CREATE IAM ROLE
-      # ---------------------------------------
-
+      # ---------------------------
       - name: Create IAM role
         run: |
-          aws iam create-role \
-            --role-name "$PROD_LAMBDA_ROLE_NAME" \
-            --assume-role-policy-document file://trust-policy.json \
-            || echo "Role may already exist"
+          if aws iam get-role \
+            --role-name "$ROLE_NAME" >/dev/null 2>&1; then
 
+            echo "Role already exists: $ROLE_NAME"
 
-      # ---------------------------------------
-      # CREATE INLINE POLICY
-      # ---------------------------------------
+          else
 
-      - name: Create permissions policy
+            aws iam create-role \
+              --role-name "$ROLE_NAME" \
+              --assume-role-policy-document file://trust-policy.json
+
+            echo "Role created: $ROLE_NAME"
+
+          fi
+
+      # ---------------------------
+      # ATTACH INLINE POLICY
+      # ---------------------------
+      - name: Attach permissions policy
         run: |
-          cat <<EOF > policy.json
+          cat > policy.json <<'EOF'
           {
             "Version": "2012-10-17",
             "Statement": [
@@ -130,28 +109,26 @@ jobs:
 
           cat policy.json
 
-
-      # ---------------------------------------
-      # ATTACH INLINE POLICY
-      # ---------------------------------------
-
-      - name: Attach permissions policy
-        run: |
           aws iam put-role-policy \
-            --role-name "$PROD_LAMBDA_ROLE_NAME" \
+            --role-name "$ROLE_NAME" \
             --policy-name glue-job-inline-policy \
             --policy-document file://policy.json
 
+          echo "Policy applied successfully."
 
-      # ---------------------------------------
+      # ---------------------------
       # VERIFY
-      # ---------------------------------------
-
-      - name: Verify created role
+      # ---------------------------
+      - name: Verify role
         run: |
-          aws iam get-role \
-            --role-name "$PROD_LAMBDA_ROLE_NAME"
+          echo "===== ROLE ====="
 
-          aws iam get-role-policy \
-            --role-name "$PROD_LAMBDA_ROLE_NAME" \
-            --policy-name glue-job-inline-policy
+          aws iam get-role \
+            --role-name "$ROLE_NAME"
+
+          echo "===== INLINE POLICIES ====="
+
+          aws iam list-role-policies \
+            --role-name "$ROLE_NAME"
+
+          echo "===== CREATE ROLE COMPLETE ====="
