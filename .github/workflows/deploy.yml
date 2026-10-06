@@ -1,1 +1,13 @@
+name: Deploy Personal Glue ETL
 
+on:
+  workflow_dispatch:
+
+jobs:
+  placeholder:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Project Ready
+        run: |
+          echo "GitHub deployment will be configured after AWS OIDC is set up."
