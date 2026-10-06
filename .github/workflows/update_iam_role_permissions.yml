@@ -11,6 +11,8 @@ env:
   AWS_REGION: us-east-2
   AWS_ACCOUNT_ID: "493272324412"
   GITHUB_AWS_ROLE: github-ecr-role
+
+  # Practice IAM role
   ROLE_NAME: practice-traffic-shap-agent-role
 
 jobs:
@@ -18,20 +20,33 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
+      # ---------------------------------
+      # Checkout repository
+      # ---------------------------------
       - name: Checkout
         uses: actions/checkout@v4
 
+      # ---------------------------------
+      # Configure AWS Credentials
+      # ---------------------------------
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ env.GITHUB_AWS_ROLE }}
           aws-region: ${{ env.AWS_REGION }}
 
+      # ---------------------------------
+      # Verify AWS Identity
+      # ---------------------------------
       - name: Verify Identity
         run: |
           aws sts get-caller-identity
 
-      - name: Fetch existing policy
+      # ---------------------------------
+      # GET EXISTING INLINE POLICY
+      # ---------------------------------
+      - name: Fetch Existing Policy
         run: |
           aws iam get-role-policy \
             --role-name "$ROLE_NAME" \
@@ -42,7 +57,10 @@ jobs:
           echo "===== EXISTING POLICY ====="
           cat existing-policy.json
 
-      - name: Append practice permissions
+      # ---------------------------------
+      # APPEND NEW PERMISSIONS
+      # ---------------------------------
+      - name: Append Permissions
         run: |
           cat > new-permission.json <<'EOF'
           [
@@ -92,7 +110,10 @@ jobs:
           echo "===== UPDATED POLICY ====="
           cat updated-policy.json
 
-      - name: Update inline policy
+      # ---------------------------------
+      # APPLY UPDATED POLICY
+      # ---------------------------------
+      - name: Update Inline Policy
         run: |
           aws iam put-role-policy \
             --role-name "$ROLE_NAME" \
@@ -101,7 +122,10 @@ jobs:
 
           echo "Permissions updated successfully."
 
-      - name: Verify final policy
+      # ---------------------------------
+      # VERIFY FINAL POLICY
+      # ---------------------------------
+      - name: Verify Final Policy
         run: |
           echo "===== FINAL POLICY ====="
 
