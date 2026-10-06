@@ -1,0 +1,218 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >
+  Bootstrap GitHub Actions OIDC access for the personal
+  Glue IAM IaC practice repository.
+
+Parameters:
+
+  GitHubRepository:
+    Type: String
+    Default: hancy121/personal-glue-etl-iac
+    Description: GitHub repository allowed to assume the deployment role
+
+
+Resources:
+
+  # ============================================================
+  # 1. GITHUB OIDC PROVIDER
+  # ============================================================
+
+  GitHubOIDCProvider:
+    Type: AWS::IAM::OIDCProvider
+
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+
+      ClientIdList:
+        - sts.amazonaws.com
+
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+
+
+  # ============================================================
+  # 2. GITHUB ACTIONS DEPLOYMENT ROLE
+  # ============================================================
+
+  GitHubDeploymentRole:
+    Type: AWS::IAM::Role
+
+    Properties:
+
+      RoleName: personal-prod-github-oidc-role
+
+      Description: >
+        GitHub Actions OIDC deployment role for
+        hancy121/personal-glue-etl-iac
+
+      # ----------------------------------------------------------
+      # TRUST POLICY
+      # ----------------------------------------------------------
+
+      AssumeRolePolicyDocument:
+
+        Version: "2012-10-17"
+
+        Statement:
+
+          - Effect: Allow
+
+            Principal:
+              Federated:
+                !Ref GitHubOIDCProvider
+
+            Action:
+              - sts:AssumeRoleWithWebIdentity
+
+            Condition:
+
+              StringEquals:
+                token.actions.githubusercontent.com:aud:
+                  sts.amazonaws.com
+
+              StringLike:
+                token.actions.githubusercontent.com:sub:
+                  !Sub "repo:${GitHubRepository}:*"
+
+
+      # ----------------------------------------------------------
+      # DEPLOYMENT PERMISSIONS
+      # ----------------------------------------------------------
+
+      Policies:
+
+        - PolicyName: PersonalIAMPracticePermissions
+
+          PolicyDocument:
+
+            Version: "2012-10-17"
+
+            Statement:
+
+              # ------------------------------------------------
+              # IAM ROLE MANAGEMENT
+              # ------------------------------------------------
+
+              - Sid: IAMRoleManagement
+
+                Effect: Allow
+
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:ListRoles
+
+                  - iam:PutRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:ListRolePolicies
+
+                  - iam:UpdateAssumeRolePolicy
+
+                  - iam:ListAttachedRolePolicies
+                  - iam:ListRolePolicies
+
+                  - iam:TagRole
+                  - iam:UntagRole
+
+                Resource: "*"
+
+
+              # ------------------------------------------------
+              # PASS ROLE
+              # ------------------------------------------------
+
+              - Sid: PassRole
+
+                Effect: Allow
+
+                Action:
+                  - iam:PassRole
+
+                Resource:
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/practice-*"
+
+
+              # ------------------------------------------------
+              # S3
+              # ------------------------------------------------
+
+              - Sid: S3PracticeAccess
+
+                Effect: Allow
+
+                Action:
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+
+                Resource: "*"
+
+
+              # ------------------------------------------------
+              # CLOUDWATCH LOGS
+              # ------------------------------------------------
+
+              - Sid: CloudWatchLogs
+
+                Effect: Allow
+
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+
+                Resource: "*"
+
+
+              # ------------------------------------------------
+              # GLUE
+              # ------------------------------------------------
+
+              - Sid: GluePracticeAccess
+
+                Effect: Allow
+
+                Action:
+                  - glue:GetJob
+                  - glue:GetJobs
+                  - glue:CreateJob
+                  - glue:UpdateJob
+                  - glue:DeleteJob
+                  - glue:StartJobRun
+                  - glue:GetJobRun
+                  - glue:GetJobRuns
+
+                Resource: "*"
+
+
+Outputs:
+
+  GitHubOIDCRoleArn:
+
+    Description: GitHub Actions OIDC deployment role ARN
+
+    Value:
+      !GetAtt GitHubDeploymentRole.Arn
+
+
+  GitHubOIDCRoleName:
+
+    Description: GitHub Actions OIDC deployment role name
+
+    Value:
+      !Ref GitHubDeploymentRole
+
+
+  GitHubOIDCProviderArn:
+
+    Description: GitHub Actions OIDC provider ARN
+
+    Value:
+      !Ref GitHubOIDCProvider
