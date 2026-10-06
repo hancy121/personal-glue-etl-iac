@@ -1,1 +1,157 @@
+name: Create Glue IAM Role
 
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/create_iam_role.yml"
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-2
+  AWS_ACCOUNT_ID: "493272324412"
+
+  # Existing GitHub OIDC deployment role
+  PROD_GITHUB_OIDC_ROLE: personal-prod-github-oidc-role
+
+  # Role that will be created
+  PROD_LAMBDA_ROLE_NAME: personal-prod-pricing-models-lambda-role
+
+jobs:
+  create-role:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ---------------------------------------
+      # DEBUG
+      # ---------------------------------------
+
+      - name: Debug context
+        run: |
+          echo "Repo: $GITHUB_REPOSITORY"
+          echo "Ref: $GITHUB_REF"
+          echo "Account: $AWS_ACCOUNT_ID"
+          echo "Region: $AWS_REGION"
+
+
+      # ---------------------------------------
+      # OIDC AUTH
+      # ---------------------------------------
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ env.PROD_GITHUB_OIDC_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+
+
+      # ---------------------------------------
+      # VERIFY AWS IDENTITY
+      # ---------------------------------------
+
+      - name: Verify Identity
+        run: |
+          aws sts get-caller-identity
+
+
+      # ---------------------------------------
+      # CREATE TRUST POLICY
+      # ---------------------------------------
+
+      - name: Create trust policy
+        run: |
+          cat <<EOF > trust-policy.json
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Principal": {
+                  "Service": "lambda.amazonaws.com"
+                },
+                "Action": "sts:AssumeRole"
+              }
+            ]
+          }
+          EOF
+
+          cat trust-policy.json
+
+
+      # ---------------------------------------
+      # CREATE IAM ROLE
+      # ---------------------------------------
+
+      - name: Create IAM role
+        run: |
+          aws iam create-role \
+            --role-name "$PROD_LAMBDA_ROLE_NAME" \
+            --assume-role-policy-document file://trust-policy.json \
+            || echo "Role may already exist"
+
+
+      # ---------------------------------------
+      # CREATE INLINE POLICY
+      # ---------------------------------------
+
+      - name: Create permissions policy
+        run: |
+          cat <<EOF > policy.json
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "CloudWatchLogs",
+                "Effect": "Allow",
+                "Action": [
+                  "logs:CreateLogGroup",
+                  "logs:CreateLogStream",
+                  "logs:PutLogEvents"
+                ],
+                "Resource": "*"
+              },
+              {
+                "Sid": "ReadShapData",
+                "Effect": "Allow",
+                "Action": [
+                  "s3:GetObject",
+                  "s3:ListBucket"
+                ],
+                "Resource": "*"
+              }
+            ]
+          }
+          EOF
+
+          cat policy.json
+
+
+      # ---------------------------------------
+      # ATTACH INLINE POLICY
+      # ---------------------------------------
+
+      - name: Attach permissions policy
+        run: |
+          aws iam put-role-policy \
+            --role-name "$PROD_LAMBDA_ROLE_NAME" \
+            --policy-name glue-job-inline-policy \
+            --policy-document file://policy.json
+
+
+      # ---------------------------------------
+      # VERIFY
+      # ---------------------------------------
+
+      - name: Verify created role
+        run: |
+          aws iam get-role \
+            --role-name "$PROD_LAMBDA_ROLE_NAME"
+
+          aws iam get-role-policy \
+            --role-name "$PROD_LAMBDA_ROLE_NAME" \
+            --policy-name glue-job-inline-policy
