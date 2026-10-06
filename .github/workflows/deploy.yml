@@ -3,11 +3,136 @@ name: Deploy Personal Glue ETL
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: us-east-2
+  AWS_ACCOUNT_ID: "493272324412"
+
 jobs:
-  placeholder:
+
+  deploy:
+    name: Deploy CDK Infrastructure
     runs-on: ubuntu-latest
 
     steps:
-      - name: Project Ready
+
+      # ============================================================
+      # 1. Checkout repository
+      # ============================================================
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+
+      # ============================================================
+      # 2. Configure Python
+      # ============================================================
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+
+      # ============================================================
+      # 3. Install dependencies
+      # ============================================================
+
+      - name: Install dependencies
         run: |
-          echo "GitHub deployment will be configured after AWS OIDC is set up."
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+
+      # ============================================================
+      # 4. Install AWS CDK
+      # ============================================================
+
+      - name: Install AWS CDK
+        run: |
+          npm install -g aws-cdk
+
+
+      # ============================================================
+      # 5. Verify CDK
+      # ============================================================
+
+      - name: Check CDK version
+        run: |
+          cdk --version
+
+
+      # ============================================================
+      # 6. Configure AWS credentials
+      #
+      # INITIAL DEPLOYMENT:
+      #
+      # These credentials must already exist in GitHub Secrets.
+      #
+      # We will remove these later and switch to OIDC.
+      # ============================================================
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+
+      # ============================================================
+      # 7. Verify AWS identity
+      # ============================================================
+
+      - name: Verify AWS Identity
+        run: |
+          aws sts get-caller-identity
+
+
+      # ============================================================
+      # 8. Bootstrap CDK
+      # ============================================================
+
+      - name: CDK Bootstrap
+        working-directory: infra
+        run: |
+          cdk bootstrap aws://${{ env.AWS_ACCOUNT_ID }}/${{ env.AWS_REGION }}
+
+
+      # ============================================================
+      # 9. CDK Synth
+      # ============================================================
+
+      - name: CDK Synth
+        working-directory: infra
+        run: |
+          cdk synth \
+            -c aws_account=${{ env.AWS_ACCOUNT_ID }} \
+            -c aws_region=${{ env.AWS_REGION }}
+
+
+      # ============================================================
+      # 10. CDK Deploy
+      # ============================================================
+
+      - name: CDK Deploy
+        working-directory: infra
+        run: |
+          cdk deploy \
+            --require-approval never \
+            -c aws_account=${{ env.AWS_ACCOUNT_ID }} \
+            -c aws_region=${{ env.AWS_REGION }}
+
+
+      # ============================================================
+      # 11. Show CloudFormation outputs
+      # ============================================================
+
+      - name: Show deployment outputs
+        run: |
+          aws cloudformation describe-stacks \
+            --stack-name PersonalGlueETLStack \
+            --region $AWS_REGION \
+            --query "Stacks[0].Outputs"
