@@ -1,1 +1,6 @@
-
+{
+  "app": "python3 app.py",
+  "context": {
+    "project_name": "personal-glue-etl"
+  }
+}
