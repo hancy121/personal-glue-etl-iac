@@ -1,0 +1,175 @@
+name: Update Existing IAM Role Permissions
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-2
+  AWS_ACCOUNT_ID: "493272324412"
+
+  # Existing role in practice account
+  ROLE_NAME: github-ecr-role
+
+  # Existing GitHub OIDC role used to authenticate GitHub Actions
+  GITHUB_OIDC_ROLE: github-ecr-role
+
+jobs:
+
+  update-role:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ============================================================
+      # 1. CHECKOUT
+      # ============================================================
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+
+      # ============================================================
+      # 2. CONFIGURE AWS CREDENTIALS
+      # ============================================================
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ env.GITHUB_OIDC_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+
+
+      # ============================================================
+      # 3. VERIFY AWS IDENTITY
+      # ============================================================
+
+      - name: Verify Identity
+        run: |
+          aws sts get-caller-identity
+
+
+      # ============================================================
+      # 4. VERIFY TARGET ROLE
+      # ============================================================
+
+      - name: Verify Target Role
+        run: |
+          echo "Target role: $ROLE_NAME"
+
+          aws iam get-role \
+            --role-name "$ROLE_NAME" \
+            --query 'Role.RoleName' \
+            --output text
+
+
+      # ============================================================
+      # 5. GET EXISTING INLINE POLICIES
+      #
+      # IMPORTANT:
+      # We do NOT delete existing policies.
+      # ============================================================
+
+      - name: List existing inline policies
+        run: |
+          echo "===== EXISTING INLINE POLICIES ====="
+
+          aws iam list-role-policies \
+            --role-name "$ROLE_NAME"
+
+
+      # ============================================================
+      # 6. CREATE DEV PERMISSIONS
+      #
+      # These are the permissions from the Dev
+      # create_iam_role.yml.
+      # ============================================================
+
+      - name: Create Dev permissions policy
+        run: |
+          cat <<EOF > dev-permissions.json
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "CloudWatchLogs",
+                "Effect": "Allow",
+                "Action": [
+                  "logs:CreateLogGroup",
+                  "logs:CreateLogStream",
+                  "logs:PutLogEvents"
+                ],
+                "Resource": "*"
+              },
+              {
+                "Sid": "ReadShapData",
+                "Effect": "Allow",
+                "Action": [
+                  "s3:GetObject",
+                  "s3:ListBucket"
+                ],
+                "Resource": "*"
+              }
+            ]
+          }
+          EOF
+
+          echo "===== DEV PERMISSIONS TO ADD ====="
+          cat dev-permissions.json
+
+
+      # ============================================================
+      # 7. ADD DEV PERMISSIONS AS INLINE POLICY
+      #
+      # Existing policies such as:
+      #
+      # cdkAllPermissions
+      # ecrFullAccess
+      #
+      # are NOT removed.
+      # ============================================================
+
+      - name: Add Dev permissions
+        run: |
+          aws iam put-role-policy \
+            --role-name "$ROLE_NAME" \
+            --policy-name dev-glue-permissions \
+            --policy-document file://dev-permissions.json
+
+
+      # ============================================================
+      # 8. VERIFY UPDATED ROLE
+      # ============================================================
+
+      - name: Verify updated permissions
+        run: |
+          echo "===== INLINE POLICIES AFTER UPDATE ====="
+
+          aws iam list-role-policies \
+            --role-name "$ROLE_NAME"
+
+          echo ""
+          echo "===== DEV GLUE PERMISSIONS ====="
+
+          aws iam get-role-policy \
+            --role-name "$ROLE_NAME" \
+            --policy-name dev-glue-permissions
+
+
+      # ============================================================
+      # 9. DONE
+      # ============================================================
+
+      - name: Done
+        run: |
+          echo "=========================================="
+          echo "IAM ROLE UPDATE COMPLETED"
+          echo "=========================================="
+          echo "Role: $ROLE_NAME"
+          echo "Account: $AWS_ACCOUNT_ID"
+          echo ""
+          echo "Existing policies were preserved."
+          echo "Dev permissions were added through GitHub Actions."
