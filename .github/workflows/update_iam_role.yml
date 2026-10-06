@@ -1,4 +1,4 @@
-name: Add Permissions & Trust
+name: Add Permissions & Trust (Non-Destructive)
 
 on:
   workflow_dispatch:
@@ -11,13 +11,16 @@ env:
   AWS_REGION: us-east-2
   AWS_ACCOUNT_ID: "493272324412"
   GITHUB_AWS_ROLE: github-ecr-role
-  ROLE_NAME: practice-glue-lambda-role
+  ROLE_NAME: practice-ea-pricing-models-sagemaker-role
 
 jobs:
   update-role:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -28,9 +31,6 @@ jobs:
         run: |
           aws sts get-caller-identity
 
-      # ---------------------------
-      # GET EXISTING TRUST POLICY
-      # ---------------------------
       - name: Fetch existing trust policy
         run: |
           aws iam get-role \
@@ -41,10 +41,7 @@ jobs:
           echo "===== EXISTING TRUST ====="
           cat existing-trust.json
 
-      # ---------------------------
-      # ADD SAGEMAKER TRUST
-      # ---------------------------
-      - name: Add SageMaker trust
+      - name: Append SageMaker trust relationship
         run: |
           cat > new-trust-entry.json <<'EOF'
           {
@@ -57,7 +54,12 @@ jobs:
           EOF
 
           jq '
-            if any(.Statement[]?; .Principal.Service == "sagemaker.amazonaws.com") then
+            if .Statement == null then
+              {
+                Version: "2012-10-17",
+                Statement: [input]
+              }
+            elif any(.Statement[]; .Principal.Service? == "sagemaker.amazonaws.com") then
               .
             else
               .Statement += [input]
@@ -67,28 +69,26 @@ jobs:
           echo "===== UPDATED TRUST ====="
           cat updated-trust.json
 
+      - name: Update trust relationship
+        run: |
           aws iam update-assume-role-policy \
             --role-name "$ROLE_NAME" \
             --policy-document file://updated-trust.json
 
-      # ---------------------------
-      # GET EXISTING INLINE POLICY
-      # ---------------------------
+          echo "Trust relationship updated successfully."
+
       - name: Fetch existing policy
         run: |
           aws iam get-role-policy \
             --role-name "$ROLE_NAME" \
             --policy-name glue-job-inline-policy \
             --query 'PolicyDocument' \
-            --output json > existing-policy.json
+            --output json > existing-policy.json || echo '{}' > existing-policy.json
 
           echo "===== EXISTING POLICY ====="
           cat existing-policy.json
 
-      # ---------------------------
-      # ADD S3 PERMISSIONS
-      # ---------------------------
-      - name: Append permissions
+      - name: Append S3 permissions
         run: |
           cat > new-permission.json <<'EOF'
           [
@@ -97,7 +97,7 @@ jobs:
               "Action": [
                 "s3:ListBucket"
               ],
-              "Resource": "arn:aws:s3:::practice-sagemaker-bucket"
+              "Resource": "arn:aws:s3:::sagemaker-us-east-2-493272324412"
             },
             {
               "Effect": "Allow",
@@ -106,7 +106,7 @@ jobs:
                 "s3:PutObject",
                 "s3:DeleteObject"
               ],
-              "Resource": "arn:aws:s3:::practice-sagemaker-bucket/*"
+              "Resource": "arn:aws:s3:::sagemaker-us-east-2-493272324412/*"
             }
           ]
           EOF
@@ -125,11 +125,30 @@ jobs:
           echo "===== UPDATED POLICY ====="
           cat updated-policy.json
 
+      - name: Update inline policy
+        run: |
           aws iam put-role-policy \
             --role-name "$ROLE_NAME" \
             --policy-name glue-job-inline-policy \
             --policy-document file://updated-policy.json
 
-      - name: Done
+          echo "Inline policy updated successfully."
+
+      - name: Verify final role
         run: |
-          echo "Added SageMaker trust and S3 permissions."
+          echo "===== FINAL TRUST ====="
+
+          aws iam get-role \
+            --role-name "$ROLE_NAME" \
+            --query 'Role.AssumeRolePolicyDocument' \
+            --output json
+
+          echo "===== FINAL INLINE POLICY ====="
+
+          aws iam get-role-policy \
+            --role-name "$ROLE_NAME" \
+            --policy-name glue-job-inline-policy \
+            --query 'PolicyDocument' \
+            --output json
+
+          echo "===== UPDATE COMPLETE ====="
