@@ -11,37 +11,55 @@ env:
   AWS_REGION: us-east-2
   AWS_ACCOUNT_ID: "493272324412"
   GITHUB_AWS_ROLE: github-ecr-role
-  ROLE_NAME: practice-ea-pricing-models-sagemaker-role
+
+  # Practice role we are updating
+  ROLE_NAME: practice-ea-pricing-models-lambda-role
 
 jobs:
   update-role:
     runs-on: ubuntu-latest
 
     steps:
+
+      # ---------------------------------
+      # Checkout repository
+      # ---------------------------------
       - name: Checkout
         uses: actions/checkout@v4
 
+      # ---------------------------------
+      # Configure AWS Credentials
+      # ---------------------------------
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ env.GITHUB_AWS_ROLE }}
           aws-region: ${{ env.AWS_REGION }}
 
+      # ---------------------------------
+      # Verify AWS Identity
+      # ---------------------------------
       - name: Verify Identity
         run: |
           aws sts get-caller-identity
 
-      - name: Fetch existing trust policy
+      # ---------------------------------
+      # GET EXISTING TRUST POLICY
+      # ---------------------------------
+      - name: Fetch Existing Trust Policy
         run: |
           aws iam get-role \
             --role-name "$ROLE_NAME" \
-            --query 'AssumeRolePolicyDocument' \
+            --query 'Role.AssumeRolePolicyDocument' \
             --output json > existing-trust.json
 
-          echo "===== EXISTING TRUST ====="
+          echo "===== EXISTING TRUST POLICY ====="
           cat existing-trust.json
 
-      - name: Append SageMaker trust relationship
+      # ---------------------------------
+      # ADD SAGEMAKER TRUST
+      # ---------------------------------
+      - name: Append SageMaker Trust Relationship
         run: |
           cat > new-trust-entry.json <<'EOF'
           {
@@ -66,10 +84,13 @@ jobs:
             end
           ' existing-trust.json new-trust-entry.json > updated-trust.json
 
-          echo "===== UPDATED TRUST ====="
+          echo "===== UPDATED TRUST POLICY ====="
           cat updated-trust.json
 
-      - name: Update trust relationship
+      # ---------------------------------
+      # APPLY UPDATED TRUST POLICY
+      # ---------------------------------
+      - name: Update Trust Relationship
         run: |
           aws iam update-assume-role-policy \
             --role-name "$ROLE_NAME" \
@@ -77,7 +98,10 @@ jobs:
 
           echo "Trust relationship updated successfully."
 
-      - name: Fetch existing policy
+      # ---------------------------------
+      # GET EXISTING INLINE POLICY
+      # ---------------------------------
+      - name: Fetch Existing Inline Policy
         run: |
           aws iam get-role-policy \
             --role-name "$ROLE_NAME" \
@@ -85,10 +109,13 @@ jobs:
             --query 'PolicyDocument' \
             --output json > existing-policy.json || echo '{}' > existing-policy.json
 
-          echo "===== EXISTING POLICY ====="
+          echo "===== EXISTING INLINE POLICY ====="
           cat existing-policy.json
 
-      - name: Append S3 permissions
+      # ---------------------------------
+      # ADD S3 PERMISSIONS
+      # ---------------------------------
+      - name: Append S3 Permissions
         run: |
           cat > new-permission.json <<'EOF'
           [
@@ -122,10 +149,13 @@ jobs:
             end
           ' existing-policy.json new-permission.json > updated-policy.json
 
-          echo "===== UPDATED POLICY ====="
+          echo "===== UPDATED INLINE POLICY ====="
           cat updated-policy.json
 
-      - name: Update inline policy
+      # ---------------------------------
+      # APPLY UPDATED INLINE POLICY
+      # ---------------------------------
+      - name: Update Inline Policy
         run: |
           aws iam put-role-policy \
             --role-name "$ROLE_NAME" \
@@ -134,16 +164,23 @@ jobs:
 
           echo "Inline policy updated successfully."
 
-      - name: Verify final role
+      # ---------------------------------
+      # FINAL VERIFICATION
+      # ---------------------------------
+      - name: Verify Final IAM Configuration
         run: |
-          echo "===== FINAL TRUST ====="
+          echo "======================================"
+          echo "FINAL TRUST POLICY"
+          echo "======================================"
 
           aws iam get-role \
             --role-name "$ROLE_NAME" \
             --query 'Role.AssumeRolePolicyDocument' \
             --output json
 
-          echo "===== FINAL INLINE POLICY ====="
+          echo "======================================"
+          echo "FINAL INLINE POLICY"
+          echo "======================================"
 
           aws iam get-role-policy \
             --role-name "$ROLE_NAME" \
@@ -151,4 +188,6 @@ jobs:
             --query 'PolicyDocument' \
             --output json
 
-          echo "===== UPDATE COMPLETE ====="
+          echo "======================================"
+          echo "IAM ROLE UPDATE COMPLETE"
+          echo "======================================"
