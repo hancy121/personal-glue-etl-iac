@@ -1,0 +1,61 @@
+name: Update GitHub Role Permissions
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-2
+  AWS_ACCOUNT_ID: "493272324412"
+  GITHUB_AWS_ROLE: github-ecr-role
+
+jobs:
+  update-role:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ env.GITHUB_AWS_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify Identity
+        run: |
+          aws sts get-caller-identity
+
+      - name: Create IAM Permissions
+        run: |
+          cat > github-role-policy.json <<'EOF'
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "AllowRoleUpdateOperations",
+                "Effect": "Allow",
+                "Action": [
+                  "iam:GetRole",
+                  "iam:GetRolePolicy",
+                  "iam:ListRolePolicies",
+                  "iam:UpdateAssumeRolePolicy",
+                  "iam:PutRolePolicy"
+                ],
+                "Resource": "*"
+              }
+            ]
+          }
+          EOF
+
+          cat github-role-policy.json
+
+      - name: Add Permissions to GitHub Role
+        run: |
+          aws iam put-role-policy \
+            --role-name "$GITHUB_AWS_ROLE" \
+            --policy-name github-role-update-permissions \
+            --policy-document file://github-role-policy.json
+
+          echo "Permissions policy added successfully."
