@@ -1,0 +1,87 @@
+name: Create Practice SHAP Agent IAM Role
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-2
+  AWS_ACCOUNT_ID: "493272324412"
+  GITHUB_AWS_ROLE: github-ecr-role
+  ROLE_NAME: practice-traffic-shap-agent-role
+
+jobs:
+  create-role:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ env.GITHUB_AWS_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify Identity
+        run: |
+          aws sts get-caller-identity
+
+      - name: Create Trust Policy
+        run: |
+          cat > trust-policy.json <<'EOF'
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Principal": {
+                  "Service": "lambda.amazonaws.com"
+                },
+                "Action": "sts:AssumeRole"
+              }
+            ]
+          }
+          EOF
+
+      - name: Create IAM Role
+        run: |
+          if aws iam get-role --role-name "$ROLE_NAME" >/dev/null 2>&1; then
+            echo "Role already exists: $ROLE_NAME"
+          else
+            aws iam create-role \
+              --role-name "$ROLE_NAME" \
+              --assume-role-policy-document file://trust-policy.json
+          fi
+
+      - name: Create Baseline Inline Policy
+        run: |
+          cat > policy.json <<'EOF'
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Action": [
+                  "logs:CreateLogGroup",
+                  "logs:CreateLogStream",
+                  "logs:PutLogEvents"
+                ],
+                "Resource": "*"
+              }
+            ]
+          }
+          EOF
+
+          aws iam put-role-policy \
+            --role-name "$ROLE_NAME" \
+            --policy-name glue-job-inline-policy \
+            --policy-document file://policy.json
+
+      - name: Verify
+        run: |
+          aws iam get-role --role-name "$ROLE_NAME"
+          aws iam get-role-policy \
+            --role-name "$ROLE_NAME" \
+            --policy-name glue-job-inline-policy
