@@ -1,11 +1,7 @@
-name: Add Permissions & Trust (Non-Destructive)
+name: Add Permissions & Trust
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/update_iam_role.yml"
+  workflow_dispatch:
 
 permissions:
   id-token: write
@@ -14,49 +10,27 @@ permissions:
 env:
   AWS_REGION: us-east-2
   AWS_ACCOUNT_ID: "493272324412"
-
-  PROD_GITHUB_OIDC_ROLE: personal-prod-github-oidc-role
-
-  ROLE_NAME: personal-prod-pricing-models-sagemaker-role
+  GITHUB_AWS_ROLE: github-ecr-role
+  ROLE_NAME: practice-glue-lambda-role
 
 jobs:
   update-role:
     runs-on: ubuntu-latest
 
     steps:
-
-      # ---------------------------------------
-      # CHECKOUT
-      # ---------------------------------------
-
-      - name: Checkout
-        uses: actions/checkout@v4
-
-
-      # ---------------------------------------
-      # OIDC AUTH
-      # ---------------------------------------
-
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ env.PROD_GITHUB_OIDC_ROLE }}
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ env.GITHUB_AWS_ROLE }}
           aws-region: ${{ env.AWS_REGION }}
-
-
-      # ---------------------------------------
-      # VERIFY IDENTITY
-      # ---------------------------------------
 
       - name: Verify Identity
         run: |
           aws sts get-caller-identity
 
-
-      # ---------------------------------------
+      # ---------------------------
       # GET EXISTING TRUST POLICY
-      # ---------------------------------------
-
+      # ---------------------------
       - name: Fetch existing trust policy
         run: |
           aws iam get-role \
@@ -64,17 +38,15 @@ jobs:
             --query 'AssumeRolePolicyDocument' \
             --output json > existing-trust.json
 
-          echo "===== EXISTING TRUST POLICY ====="
+          echo "===== EXISTING TRUST ====="
           cat existing-trust.json
 
-
-      # ---------------------------------------
-      # CREATE NEW SAGEMAKER TRUST ENTRY
-      # ---------------------------------------
-
-      - name: Create SageMaker trust entry
+      # ---------------------------
+      # ADD SAGEMAKER TRUST
+      # ---------------------------
+      - name: Add SageMaker trust
         run: |
-          cat <<EOF > new-trust-entry.json
+          cat > new-trust-entry.json <<'EOF'
           {
             "Effect": "Allow",
             "Principal": {
@@ -84,74 +56,48 @@ jobs:
           }
           EOF
 
-          cat new-trust-entry.json
-
-
-      # ---------------------------------------
-      # APPEND TRUST SAFELY
-      # ---------------------------------------
-
-      - name: Append SageMaker trust relationship
-        run: |
           jq '
-            if .Statement == null then
-              {
-                Version: "2012-10-17",
-                Statement: [input]
-              }
-            elif any(.Statement[]; .Principal.Service? == "sagemaker.amazonaws.com") then
+            if any(.Statement[]?; .Principal.Service == "sagemaker.amazonaws.com") then
               .
             else
               .Statement += [input]
             end
           ' existing-trust.json new-trust-entry.json > updated-trust.json
 
-          echo "===== UPDATED TRUST POLICY ====="
+          echo "===== UPDATED TRUST ====="
           cat updated-trust.json
 
-
-      # ---------------------------------------
-      # APPLY TRUST POLICY
-      # ---------------------------------------
-
-      - name: Update trust policy
-        run: |
           aws iam update-assume-role-policy \
             --role-name "$ROLE_NAME" \
             --policy-document file://updated-trust.json
 
-
-      # ---------------------------------------
+      # ---------------------------
       # GET EXISTING INLINE POLICY
-      # ---------------------------------------
-
-      - name: Fetch existing inline policy
+      # ---------------------------
+      - name: Fetch existing policy
         run: |
           aws iam get-role-policy \
             --role-name "$ROLE_NAME" \
             --policy-name glue-job-inline-policy \
             --query 'PolicyDocument' \
-            --output json > existing-policy.json \
-            || echo '{}' > existing-policy.json
+            --output json > existing-policy.json
 
           echo "===== EXISTING POLICY ====="
           cat existing-policy.json
 
-
-      # ---------------------------------------
-      # CREATE NEW S3 PERMISSIONS
-      # ---------------------------------------
-
-      - name: Create S3 permissions
+      # ---------------------------
+      # ADD S3 PERMISSIONS
+      # ---------------------------
+      - name: Append permissions
         run: |
-          cat <<EOF > new-permission.json
+          cat > new-permission.json <<'EOF'
           [
             {
               "Effect": "Allow",
               "Action": [
                 "s3:ListBucket"
               ],
-              "Resource": "arn:aws:s3:::sagemaker-us-east-2-493272324412"
+              "Resource": "arn:aws:s3:::practice-sagemaker-bucket"
             },
             {
               "Effect": "Allow",
@@ -160,20 +106,11 @@ jobs:
                 "s3:PutObject",
                 "s3:DeleteObject"
               ],
-              "Resource": "arn:aws:s3:::sagemaker-us-east-2-493272324412/*"
+              "Resource": "arn:aws:s3:::practice-sagemaker-bucket/*"
             }
           ]
           EOF
 
-          cat new-permission.json
-
-
-      # ---------------------------------------
-      # MERGE POLICY
-      # ---------------------------------------
-
-      - name: Merge S3 permissions
-        run: |
           jq '
             if .Statement == null then
               {
@@ -188,23 +125,11 @@ jobs:
           echo "===== UPDATED POLICY ====="
           cat updated-policy.json
 
-
-      # ---------------------------------------
-      # APPLY POLICY
-      # ---------------------------------------
-
-      - name: Apply updated policy
-        run: |
           aws iam put-role-policy \
             --role-name "$ROLE_NAME" \
             --policy-name glue-job-inline-policy \
             --policy-document file://updated-policy.json
 
-
-      # ---------------------------------------
-      # DONE
-      # ---------------------------------------
-
       - name: Done
         run: |
-          echo "Added SageMaker trust and S3 permissions without deleting existing permissions."
+          echo "Added SageMaker trust and S3 permissions."
