@@ -1,1 +1,155 @@
+name: Add IAM Permissions (Non-Destructive)
 
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/update_iam_role_permissions.yml"
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-2
+  AWS_ACCOUNT_ID: "493272324412"
+
+  PROD_GITHUB_OIDC_ROLE: personal-prod-github-oidc-role
+
+  ROLE_NAME: personal-prod-traffic-shap-agent-role
+
+jobs:
+  update-role:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ---------------------------------------
+      # CHECKOUT
+      # ---------------------------------------
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+
+      # ---------------------------------------
+      # OIDC AUTH
+      # ---------------------------------------
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ env.PROD_GITHUB_OIDC_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+
+
+      # ---------------------------------------
+      # VERIFY IDENTITY
+      # ---------------------------------------
+
+      - name: Verify Identity
+        run: |
+          aws sts get-caller-identity
+
+
+      # ---------------------------------------
+      # GET EXISTING INLINE POLICY
+      # ---------------------------------------
+
+      - name: Fetch existing policy
+        run: |
+          aws iam get-role-policy \
+            --role-name "$ROLE_NAME" \
+            --policy-name glue-job-inline-policy \
+            --query 'PolicyDocument' \
+            --output json > existing-policy.json \
+            || echo '{}' > existing-policy.json
+
+          echo "===== EXISTING POLICY ====="
+          cat existing-policy.json
+
+
+      # ---------------------------------------
+      # CREATE NEW PERMISSIONS
+      # ---------------------------------------
+
+      - name: Create new permissions
+        run: |
+          cat <<EOF > new-permission.json
+          [
+            {
+              "Effect": "Allow",
+              "Action": [
+                "s3:GetObject",
+                "s3:ListBucket"
+              ],
+              "Resource": [
+                "arn:aws:s3:::analytics-ea-ds-dev",
+                "arn:aws:s3:::analytics-ea-ds-dev/*"
+              ]
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "s3:GetObject",
+                "s3:ListBucket"
+              ],
+              "Resource": [
+                "arn:aws:s3:::analytics-ea-ds-pricing",
+                "arn:aws:s3:::analytics-ea-ds-pricing/*"
+              ]
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "lambda:InvokeFunction"
+              ],
+              "Resource": "*"
+            }
+          ]
+          EOF
+
+          cat new-permission.json
+
+
+      # ---------------------------------------
+      # MERGE EXISTING + NEW PERMISSIONS
+      # ---------------------------------------
+
+      - name: Merge permissions
+        run: |
+          jq '
+            if .Statement == null then
+              {
+                Version: "2012-10-17",
+                Statement: input
+              }
+            else
+              .Statement += input
+            end
+          ' existing-policy.json new-permission.json > updated-policy.json
+
+          echo "===== UPDATED POLICY ====="
+          cat updated-policy.json
+
+
+      # ---------------------------------------
+      # APPLY POLICY
+      # ---------------------------------------
+
+      - name: Apply updated policy
+        run: |
+          aws iam put-role-policy \
+            --role-name "$ROLE_NAME" \
+            --policy-name glue-job-inline-policy \
+            --policy-document file://updated-policy.json
+
+
+      # ---------------------------------------
+      # DONE
+      # ---------------------------------------
+
+      - name: Done
+        run: |
+          echo "Added permissions without modifying trust relationships."
