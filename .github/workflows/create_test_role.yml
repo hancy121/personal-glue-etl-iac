@@ -26,15 +26,12 @@ jobs:
 
       - name: Verify AWS identity
         run: |
-          echo "Connected to AWS:"
           aws sts get-caller-identity
 
       - name: Create IAM role
         shell: bash
         run: |
           set -e
-
-          ROLE_NAME="${TEST_ROLE_NAME}"
 
           cat > trust-policy.json <<'EOF'
           {
@@ -51,24 +48,20 @@ jobs:
           }
           EOF
 
-          echo "Creating role: $ROLE_NAME"
-
-          if aws iam get-role --role-name "$ROLE_NAME" >/dev/null 2>&1; then
-            echo "Role already exists: $ROLE_NAME"
+          if aws iam get-role --role-name "$TEST_ROLE_NAME" >/dev/null 2>&1; then
+            echo "Role already exists: $TEST_ROLE_NAME"
           else
             aws iam create-role \
-              --role-name "$ROLE_NAME" \
+              --role-name "$TEST_ROLE_NAME" \
               --assume-role-policy-document file://trust-policy.json
 
-            echo "Role created successfully."
+            echo "Role created."
           fi
 
-      - name: Add initial inline policy
+      - name: Apply initial permissions
         shell: bash
         run: |
           set -e
-
-          ROLE_NAME="${TEST_ROLE_NAME}"
 
           cat > glue-job-inline-policy.json <<'EOF'
           {
@@ -96,23 +89,22 @@ jobs:
           EOF
 
           aws iam put-role-policy \
-            --role-name "$ROLE_NAME" \
+            --role-name "$TEST_ROLE_NAME" \
             --policy-name glue-job-inline-policy \
             --policy-document file://glue-job-inline-policy.json
 
-          echo "Inline policy applied successfully."
+          echo "Initial permissions applied."
 
       - name: Verify role
         run: |
           echo "=== IAM Role ==="
+
           aws iam get-role \
-            --role-name "${TEST_ROLE_NAME}"
+            --role-name "$TEST_ROLE_NAME"
 
           echo "=== Inline Policies ==="
-          aws iam list-role-policies \
-            --role-name "${TEST_ROLE_NAME}"
 
-          echo "=== Policy ==="
-          aws iam get-role-policy \
-            --role-name "${TEST_ROLE_NAME}" \
-            --policy-name glue-job-inline-policy
+          aws iam list-role-policies \
+            --role-name "$TEST_ROLE_NAME"
+
+          echo "Role creation and policy application successful."
