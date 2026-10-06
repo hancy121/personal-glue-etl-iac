@@ -18,6 +18,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Debug context
         run: |
           echo "Repo: $GITHUB_REPOSITORY"
@@ -34,11 +35,11 @@ jobs:
           aws sts get-caller-identity
 
       # ---------------------------
-      # CREATE TRUST POLICY
+      # CREATE TRUST POLICY FILE
       # ---------------------------
       - name: Create trust policy
         run: |
-          cat > trust-policy.json <<'EOF'
+          cat <<EOF > trust-policy.json
           {
             "Version": "2012-10-17",
             "Statement": [
@@ -60,27 +61,17 @@ jobs:
       # ---------------------------
       - name: Create IAM role
         run: |
-          if aws iam get-role \
-            --role-name "$ROLE_NAME" >/dev/null 2>&1; then
-
-            echo "Role already exists: $ROLE_NAME"
-
-          else
-
-            aws iam create-role \
-              --role-name "$ROLE_NAME" \
-              --assume-role-policy-document file://trust-policy.json
-
-            echo "Role created: $ROLE_NAME"
-
-          fi
+          aws iam create-role \
+            --role-name "$ROLE_NAME" \
+            --assume-role-policy-document file://trust-policy.json \
+            || echo "Role may already exist"
 
       # ---------------------------
       # ATTACH INLINE POLICY
       # ---------------------------
       - name: Attach permissions policy
         run: |
-          cat > policy.json <<'EOF'
+          cat <<EOF > policy.json
           {
             "Version": "2012-10-17",
             "Statement": [
@@ -113,8 +104,6 @@ jobs:
             --role-name "$ROLE_NAME" \
             --policy-name glue-job-inline-policy \
             --policy-document file://policy.json
-
-          echo "Policy applied successfully."
 
       # ---------------------------
       # VERIFY
