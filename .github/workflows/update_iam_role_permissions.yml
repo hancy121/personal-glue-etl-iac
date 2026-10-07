@@ -1,7 +1,11 @@
 name: Add IAM Permissions (Non-Destructive)
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/update_iam_role_permissions.yml"
 
 permissions:
   id-token: write
@@ -9,10 +13,6 @@ permissions:
 
 env:
   AWS_REGION: us-east-2
-  AWS_ACCOUNT_ID: "493272324412"
-  GITHUB_AWS_ROLE: github-ecr-role
-
-  # Practice IAM role
   ROLE_NAME: practice-traffic-shap-agent-role
 
 jobs:
@@ -20,49 +20,38 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-
-      # ---------------------------------
-      # Checkout repository
-      # ---------------------------------
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ---------------------------------
-      # Configure AWS Credentials
-      # ---------------------------------
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ env.GITHUB_AWS_ROLE }}
+          # 🟢 Practice GitHub Actions/OIDC role
+          role-to-assume: arn:aws:iam::493272324412:role/github-ecr-role
           aws-region: ${{ env.AWS_REGION }}
 
-      # ---------------------------------
-      # Verify AWS Identity
-      # ---------------------------------
       - name: Verify Identity
-        run: |
-          aws sts get-caller-identity
+        run: aws sts get-caller-identity
 
-      # ---------------------------------
+      # ---------------------------
       # GET EXISTING INLINE POLICY
-      # ---------------------------------
-      - name: Fetch Existing Policy
+      # ---------------------------
+      - name: Fetch existing policy
         run: |
           aws iam get-role-policy \
-            --role-name "$ROLE_NAME" \
+            --role-name $ROLE_NAME \
             --policy-name glue-job-inline-policy \
             --query 'PolicyDocument' \
             --output json > existing-policy.json || echo '{}' > existing-policy.json
 
-          echo "===== EXISTING POLICY ====="
           cat existing-policy.json
 
-      # ---------------------------------
+      # ---------------------------
       # APPEND NEW PERMISSIONS
-      # ---------------------------------
-      - name: Append Permissions
+      # ---------------------------
+      - name: Append permissions
         run: |
-          cat > new-permission.json <<'EOF'
+          cat <<EOF > new-permission.json
           [
             {
               "Effect": "Allow",
@@ -92,6 +81,13 @@ jobs:
                 "lambda:InvokeFunction"
               ],
               "Resource": "*"
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "s3:GetObject"
+              ],
+              "Resource": "arn:aws:s3:::practice-analytics-ea-ds-pricing/ELASTICITY/*"
             }
           ]
           EOF
@@ -110,29 +106,10 @@ jobs:
           echo "===== UPDATED POLICY ====="
           cat updated-policy.json
 
-      # ---------------------------------
-      # APPLY UPDATED POLICY
-      # ---------------------------------
-      - name: Update Inline Policy
-        run: |
           aws iam put-role-policy \
-            --role-name "$ROLE_NAME" \
+            --role-name $ROLE_NAME \
             --policy-name glue-job-inline-policy \
             --policy-document file://updated-policy.json
 
-          echo "Permissions updated successfully."
-
-      # ---------------------------------
-      # VERIFY FINAL POLICY
-      # ---------------------------------
-      - name: Verify Final Policy
-        run: |
-          echo "===== FINAL POLICY ====="
-
-          aws iam get-role-policy \
-            --role-name "$ROLE_NAME" \
-            --policy-name glue-job-inline-policy \
-            --query 'PolicyDocument' \
-            --output json
-
-          echo "===== UPDATE COMPLETE ====="
+      - name: Done
+        run: echo "Added permissions without modifying trust relationships"
