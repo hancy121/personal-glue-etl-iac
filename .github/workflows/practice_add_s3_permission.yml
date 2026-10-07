@@ -1,0 +1,87 @@
+name: Practice - Add S3 Permission
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_ACCOUNT_ID: "493272324412"
+  AWS_REGION: us-east-2
+  AWS_DEPLOYMENT_ROLE_ARN: arn:aws:iam::493272324412:role/github-ecr-role
+  TARGET_ROLE_NAME: practice-traffic-shap-agent-role
+
+jobs:
+  update-role:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOYMENT_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS Identity
+        run: |
+          aws sts get-caller-identity
+
+      - name: Fetch Existing Policy
+        run: |
+          aws iam get-role-policy \
+            --role-name "$TARGET_ROLE_NAME" \
+            --policy-name glue-job-inline-policy \
+            --query 'PolicyDocument' \
+            --output json > existing-policy.json
+
+          echo "===== EXISTING POLICY ====="
+          cat existing-policy.json
+
+      - name: Append New S3 Permission
+        run: |
+          cat > new-permission.json <<'EOF'
+          [
+            {
+              "Sid": "PracticeReadElasticityFiles",
+              "Effect": "Allow",
+              "Action": [
+                "s3:GetObject"
+              ],
+              "Resource": "arn:aws:s3:::practice-analytics-ea-ds-pricing/ELASTICITY/*"
+            }
+          ]
+          EOF
+
+          jq '
+            .Statement += input
+          ' existing-policy.json new-permission.json > updated-policy.json
+
+          echo "===== UPDATED POLICY ====="
+          cat updated-policy.json
+
+      - name: Update Existing Inline Policy
+        run: |
+          aws iam put-role-policy \
+            --role-name "$TARGET_ROLE_NAME" \
+            --policy-name glue-job-inline-policy \
+            --policy-document file://updated-policy.json
+
+          echo "New permission added successfully."
+
+      - name: Verify Final Policy
+        run: |
+          echo "===== FINAL POLICY ====="
+
+          aws iam get-role-policy \
+            --role-name "$TARGET_ROLE_NAME" \
+            --policy-name glue-job-inline-policy \
+            --query 'PolicyDocument' \
+            --output json
+
+          echo "===== UPDATE COMPLETE ====="
