@@ -16,32 +16,18 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-
-      # ---------------------------
-      # CHECKOUT
-      # ---------------------------
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ---------------------------
-      # CONFIGURE AWS CREDENTIALS
-      # ---------------------------
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::493272324412:role/github-ecr-role
           aws-region: ${{ env.AWS_REGION }}
 
-      # ---------------------------
-      # VERIFY AWS IDENTITY
-      # ---------------------------
-      - name: Verify Identity
-        run: |
-          aws sts get-caller-identity
+      - name: Verify AWS Identity
+        run: aws sts get-caller-identity
 
-      # ---------------------------
-      # GET EXISTING INLINE POLICY
-      # ---------------------------
       - name: Fetch existing policy
         run: |
           aws iam get-role-policy \
@@ -53,9 +39,6 @@ jobs:
           echo "===== EXISTING POLICY ====="
           cat existing-policy.json
 
-      # ---------------------------
-      # CREATE NEW PERMISSIONS
-      # ---------------------------
       - name: Create new permissions
         run: |
           cat <<EOF > new-permission.json
@@ -73,6 +56,20 @@ jobs:
                 "s3:GetObject"
               ],
               "Resource": "arn:aws:s3:::aws-glue-assets-493272324412-us-east-1/*"
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "s3:ListBucket"
+              ],
+              "Resource": "arn:aws:s3:::aws-glue-assets-493272324412-us-east-1"
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "cloudwatch:PutMetricData"
+              ],
+              "Resource": "*"
             }
           ]
           EOF
@@ -80,9 +77,6 @@ jobs:
           echo "===== NEW PERMISSIONS ====="
           cat new-permission.json
 
-      # ---------------------------
-      # COMBINE EXISTING + NEW
-      # ---------------------------
       - name: Build updated policy
         run: |
           jq '
@@ -99,9 +93,6 @@ jobs:
           echo "===== UPDATED POLICY ====="
           cat updated-policy.json
 
-      # ---------------------------
-      # UPDATE IAM ROLE
-      # ---------------------------
       - name: Update IAM role policy
         run: |
           aws iam put-role-policy \
@@ -109,9 +100,6 @@ jobs:
             --policy-name glue-job-inline-policy \
             --policy-document file://updated-policy.json
 
-      # ---------------------------
-      # DONE
-      # ---------------------------
       - name: Done
         run: |
-          echo "Added sts:AssumeRole and S3 GetObject permissions."
+          echo "Added AssumeRole, S3, and CloudWatch permissions."
