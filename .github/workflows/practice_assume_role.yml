@@ -54,9 +54,9 @@ jobs:
           cat existing-policy.json
 
       # ---------------------------
-      # CREATE NEW PERMISSION
+      # CREATE NEW PERMISSIONS
       # ---------------------------
-      - name: Create AssumeRole permission
+      - name: Create new permissions
         run: |
           cat <<EOF > new-permission.json
           [
@@ -66,11 +66,18 @@ jobs:
                 "sts:AssumeRole"
               ],
               "Resource": "arn:aws:iam::493272324412:role/practice-redshift-s3-role"
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "s3:GetObject"
+              ],
+              "Resource": "arn:aws:s3:::aws-glue-assets-493272324412-us-east-1/*"
             }
           ]
           EOF
 
-          echo "===== NEW PERMISSION ====="
+          echo "===== NEW PERMISSIONS ====="
           cat new-permission.json
 
       # ---------------------------
@@ -107,4 +114,4 @@ jobs:
       # ---------------------------
       - name: Done
         run: |
-          echo "Added sts:AssumeRole permission to practice-glue-role."
+          echo "Added sts:AssumeRole and S3 GetObject permissions."
