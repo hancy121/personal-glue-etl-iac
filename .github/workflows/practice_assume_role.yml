@@ -1,0 +1,110 @@
+name: Practice Add AssumeRole Permission
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-2
+  ROLE_NAME: practice-glue-role
+
+jobs:
+  update-role:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ---------------------------
+      # CHECKOUT
+      # ---------------------------
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ---------------------------
+      # CONFIGURE AWS CREDENTIALS
+      # ---------------------------
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::493272324412:role/github-ecr-role
+          aws-region: ${{ env.AWS_REGION }}
+
+      # ---------------------------
+      # VERIFY AWS IDENTITY
+      # ---------------------------
+      - name: Verify Identity
+        run: |
+          aws sts get-caller-identity
+
+      # ---------------------------
+      # GET EXISTING INLINE POLICY
+      # ---------------------------
+      - name: Fetch existing policy
+        run: |
+          aws iam get-role-policy \
+            --role-name "$ROLE_NAME" \
+            --policy-name glue-job-inline-policy \
+            --query 'PolicyDocument' \
+            --output json > existing-policy.json
+
+          echo "===== EXISTING POLICY ====="
+          cat existing-policy.json
+
+      # ---------------------------
+      # CREATE NEW PERMISSION
+      # ---------------------------
+      - name: Create AssumeRole permission
+        run: |
+          cat <<EOF > new-permission.json
+          [
+            {
+              "Effect": "Allow",
+              "Action": [
+                "sts:AssumeRole"
+              ],
+              "Resource": "arn:aws:iam::493272324412:role/practice-redshift-s3-role"
+            }
+          ]
+          EOF
+
+          echo "===== NEW PERMISSION ====="
+          cat new-permission.json
+
+      # ---------------------------
+      # COMBINE EXISTING + NEW
+      # ---------------------------
+      - name: Build updated policy
+        run: |
+          jq '
+            if .Statement == null then
+              {
+                Version: "2012-10-17",
+                Statement: input
+              }
+            else
+              .Statement += input
+            end
+          ' existing-policy.json new-permission.json > updated-policy.json
+
+          echo "===== UPDATED POLICY ====="
+          cat updated-policy.json
+
+      # ---------------------------
+      # UPDATE IAM ROLE
+      # ---------------------------
+      - name: Update IAM role policy
+        run: |
+          aws iam put-role-policy \
+            --role-name "$ROLE_NAME" \
+            --policy-name glue-job-inline-policy \
+            --policy-document file://updated-policy.json
+
+      # ---------------------------
+      # DONE
+      # ---------------------------
+      - name: Done
+        run: |
+          echo "Added sts:AssumeRole permission to practice-glue-role."
