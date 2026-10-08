@@ -26,21 +26,26 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Verify AWS Identity
-        run: aws sts get-caller-identity
+        run: |
+          echo "===== AWS IDENTITY ====="
+          aws sts get-caller-identity
 
       - name: Fetch existing policy
         run: |
+          echo "===== EXISTING POLICY ====="
+
           aws iam get-role-policy \
             --role-name "$ROLE_NAME" \
             --policy-name glue-job-inline-policy \
             --query 'PolicyDocument' \
             --output json > existing-policy.json
 
-          echo "===== EXISTING POLICY ====="
           cat existing-policy.json
 
-      - name: Create new permissions
+      - name: Create AssumeRole permission
         run: |
+          echo "===== NEW PERMISSION ====="
+
           cat <<EOF > new-permission.json
           [
             {
@@ -49,43 +54,16 @@ jobs:
                 "sts:AssumeRole"
               ],
               "Resource": "arn:aws:iam::493272324412:role/practice-redshift-s3-role"
-            },
-            {
-              "Effect": "Allow",
-              "Action": [
-                "s3:GetObject"
-              ],
-              "Resource": "arn:aws:s3:::aws-glue-assets-493272324412-us-east-1/*"
-            },
-            {
-              "Effect": "Allow",
-              "Action": [
-                "s3:ListBucket"
-              ],
-              "Resource": "arn:aws:s3:::aws-glue-assets-493272324412-us-east-1"
-            },
-            {
-              "Effect": "Allow",
-              "Action": [
-                "cloudwatch:PutMetricData"
-              ],
-              "Resource": "*"
-            },
-            {
-              "Effect": "Allow",
-              "Action": [
-                "s3:PutObject"
-              ],
-              "Resource": "arn:aws:s3:::aws-glue-assets-493272324412-us-east-1/sparkHistoryLogs/*"
             }
           ]
           EOF
 
-          echo "===== NEW PERMISSIONS ====="
           cat new-permission.json
 
       - name: Build updated policy
         run: |
+          echo "===== BUILDING UPDATED POLICY ====="
+
           jq '
             if .Statement == null then
               {
@@ -102,11 +80,32 @@ jobs:
 
       - name: Update IAM role policy
         run: |
+          echo "===== UPDATING IAM ROLE ====="
+
           aws iam put-role-policy \
             --role-name "$ROLE_NAME" \
             --policy-name glue-job-inline-policy \
             --policy-document file://updated-policy.json
 
+          echo "IAM role policy updated successfully."
+
+      - name: Verify AssumeRole permission
+        run: |
+          echo "===== VERIFYING ASSUMEROLE PERMISSION ====="
+
+          aws iam get-role-policy \
+            --role-name "$ROLE_NAME" \
+            --policy-name glue-job-inline-policy \
+            --query 'PolicyDocument.Statement[?contains(Action, `sts:AssumeRole`)]' \
+            --output json
+
       - name: Done
         run: |
-          echo "Added AssumeRole, S3, and CloudWatch permissions."
+          echo "=========================================="
+          echo "AssumeRole permission added successfully."
+          echo "Source role:"
+          echo "$ROLE_NAME"
+          echo ""
+          echo "Target role:"
+          echo "arn:aws:iam::493272324412:role/practice-redshift-s3-role"
+          echo "=========================================="
