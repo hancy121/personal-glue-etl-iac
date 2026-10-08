@@ -70,6 +70,13 @@ jobs:
                 "cloudwatch:PutMetricData"
               ],
               "Resource": "*"
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "s3:PutObject"
+              ],
+              "Resource": "arn:aws:s3:::aws-glue-assets-493272324412-us-east-1/sparkHistoryLogs/*"
             }
           ]
           EOF
