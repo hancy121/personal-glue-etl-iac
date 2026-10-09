@@ -1,0 +1,145 @@
+
+name: Practice Add AssumeRole Permission
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  AWS_ACCOUNT_ID: "493272324412"
+  GITHUB_AWS_ROLE: github-ecr-role
+  SOURCE_ROLE_NAME: practice-glue-role
+  TARGET_ROLE_ARN: arn:aws:iam::493272324412:role/practice-redshift-s3-role
+  POLICY_NAME: glue-job-inline-policy
+
+jobs:
+  add-assume-role-permission:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout repository
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # 2. Authenticate to AWS using GitHub OIDC
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::493272324412:role/github-ecr-role
+          aws-region: ${{ env.AWS_REGION }}
+
+      # 3. Verify identity
+      - name: Verify AWS Identity
+        run: |
+          set -euo pipefail
+          aws sts get-caller-identity
+
+      # 4. Read existing inline policy
+      - name: Fetch Existing Inline Policy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          aws iam get-role-policy \
+            --role-name "$SOURCE_ROLE_NAME" \
+            --policy-name "$POLICY_NAME" \
+            --query 'PolicyDocument' \
+            --output json > existing-policy.json
+
+          echo "===== EXISTING POLICY ====="
+          cat existing-policy.json
+
+      # 5. Add narrowly scoped AssumeRole permission
+      - name: Add AssumeRole Permission
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          jq --arg target "$TARGET_ROLE_ARN" '
+            .Version = (.Version // "2012-10-17") |
+            .Statement = (.Statement // []) |
+            if any(
+              .Statement[];
+              .Effect == "Allow"
+              and (
+                .Action == "sts:AssumeRole"
+                or (
+                  (.Action | type) == "array"
+                  and (.Action | index("sts:AssumeRole")) != null
+                )
+              )
+              and (
+                .Resource == $target
+                or (
+                  (.Resource | type) == "array"
+                  and (.Resource | index($target)) != null
+                )
+              )
+            )
+            then .
+            else
+              .Statement += [{
+                "Effect": "Allow",
+                "Action": "sts:AssumeRole",
+                "Resource": $target
+              }]
+            end
+          ' existing-policy.json > updated-policy.json
+
+          echo "===== PROPOSED POLICY ====="
+          cat updated-policy.json
+
+      # 6. Apply updated policy
+      - name: Apply Updated Inline Policy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          aws iam put-role-policy \
+            --role-name "$SOURCE_ROLE_NAME" \
+            --policy-name "$POLICY_NAME" \
+            --policy-document file://updated-policy.json
+
+          echo "AssumeRole permission policy submitted."
+
+      # 7. Verify permission
+      - name: Verify Updated Policy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          aws iam get-role-policy \
+            --role-name "$SOURCE_ROLE_NAME" \
+            --policy-name "$POLICY_NAME" \
+            --query 'PolicyDocument' \
+            --output json > verified-policy.json
+
+          echo "===== VERIFIED POLICY ====="
+          cat verified-policy.json
+
+          jq -e --arg target "$TARGET_ROLE_ARN" '
+            any(
+              .Statement[];
+              .Effect == "Allow"
+              and (
+                .Action == "sts:AssumeRole"
+                or (
+                  (.Action | type) == "array"
+                  and (.Action | index("sts:AssumeRole")) != null
+                )
+              )
+              and (
+                .Resource == $target
+                or (
+                  (.Resource | type) == "array"
+                  and (.Resource | index($target)) != null
+                )
+              )
+            )
+          ' verified-policy.json
+
+          echo "SUCCESS: AssumeRole permission verified."
