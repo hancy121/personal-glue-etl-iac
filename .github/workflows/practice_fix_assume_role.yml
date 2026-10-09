@@ -1,0 +1,137 @@
+
+name: Practice Fix AssumeRole Trust
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  AWS_ACCOUNT_ID: "493272324412"
+  GITHUB_AWS_ROLE: github-ecr-role
+  TARGET_ROLE_NAME: practice-redshift-s3-role
+  SOURCE_ROLE_ARN: arn:aws:iam::493272324412:role/practice-glue-role
+
+jobs:
+  fix-trust-policy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::493272324412:role/github-ecr-role
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS Identity
+        run: |
+          aws sts get-caller-identity
+
+      - name: Check Target Role and Read Trust Policy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          aws iam get-role \
+            --role-name "$TARGET_ROLE_NAME" \
+            --query 'Role.Arn' \
+            --output text
+
+          aws iam get-role \
+            --role-name "$TARGET_ROLE_NAME" \
+            --query 'Role.AssumeRolePolicyDocument' \
+            --output json > existing-trust.json
+
+          echo "===== CURRENT TRUST POLICY ====="
+          cat existing-trust.json
+
+      - name: Prepare Updated Trust Policy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          jq --arg principal "$SOURCE_ROLE_ARN" '
+            if any(
+              .Statement[]?;
+              (
+                .Principal.AWS? == $principal
+                or (
+                  (.Principal.AWS? | type) == "array"
+                  and (.Principal.AWS | index($principal)) != null
+                )
+              )
+              and (
+                .Action == "sts:AssumeRole"
+                or (
+                  (.Action | type) == "array"
+                  and (.Action | index("sts:AssumeRole")) != null
+                )
+              )
+            )
+            then .
+            else
+              .Statement += [{
+                "Effect": "Allow",
+                "Principal": {
+                  "AWS": $principal
+                },
+                "Action": "sts:AssumeRole"
+              }]
+            end
+          ' existing-trust.json > updated-trust.json
+
+          echo "===== PROPOSED TRUST POLICY ====="
+          cat updated-trust.json
+
+      - name: Apply Trust Policy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          aws iam update-assume-role-policy \
+            --role-name "$TARGET_ROLE_NAME" \
+            --policy-document file://updated-trust.json
+
+          echo "Trust policy update submitted."
+
+      - name: Verify Trust Policy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          aws iam get-role \
+            --role-name "$TARGET_ROLE_NAME" \
+            --query 'Role.AssumeRolePolicyDocument' \
+            --output json > verified-trust.json
+
+          echo "===== VERIFIED TRUST POLICY ====="
+          cat verified-trust.json
+
+          jq -e --arg principal "$SOURCE_ROLE_ARN" '
+            any(
+              .Statement[]?;
+              .Effect == "Allow"
+              and (
+                .Principal.AWS? == $principal
+                or (
+                  (.Principal.AWS? | type) == "array"
+                  and (.Principal.AWS | index($principal)) != null
+                )
+              )
+              and (
+                .Action == "sts:AssumeRole"
+                or (
+                  (.Action | type) == "array"
+                  and (.Action | index("sts:AssumeRole")) != null
+                )
+              )
+            )
+          ' verified-trust.json
+
+          echo "SUCCESS: Glue execution role is trusted."
