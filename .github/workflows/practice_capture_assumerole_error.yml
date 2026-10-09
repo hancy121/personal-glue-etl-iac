@@ -26,7 +26,7 @@ jobs:
           role-to-assume: arn:aws:iam::493272324412:role/github-ecr-role
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Verify Identity and Glue Configuration
+      - name: Verify AWS Identity and Glue Configuration
         run: |
           set -e
 
@@ -37,8 +37,19 @@ jobs:
           aws glue get-job \
             --job-name "$GLUE_JOB_NAME" \
             --region "$AWS_REGION" \
-            --query 'Job.{Name:Name,Role:Role,Script:Command.ScriptLocation}' \
+            --query 'Job.{Name:Name,Role:Role,Script:Command.ScriptLocation,GlueVersion:GlueVersion}' \
             --output json
+
+      - name: Discover CloudWatch Log Groups
+        run: |
+          set -e
+
+          echo "===== AVAILABLE GLUE LOG GROUPS ====="
+
+          aws logs describe-log-groups \
+            --region "$AWS_REGION" \
+            --query "logGroups[?contains(logGroupName, 'glue') || contains(logGroupName, 'Glue')].{Name:logGroupName,Created:creationTime}" \
+            --output table
 
       - name: Start Glue Job
         id: start
@@ -51,8 +62,14 @@ jobs:
             --query 'JobRunId' \
             --output text)
 
+          if [[ -z "$JOB_RUN_ID" || "$JOB_RUN_ID" == "None" ]]; then
+            echo "Failed to obtain Glue Job Run ID."
+            exit 1
+          fi
+
           echo "JOB_RUN_ID=$JOB_RUN_ID" >> "$GITHUB_OUTPUT"
-          echo "Started run: $JOB_RUN_ID"
+          echo "Started Glue job: $GLUE_JOB_NAME"
+          echo "Job Run ID: $JOB_RUN_ID"
 
       - name: Wait for Glue Job
         id: wait
@@ -82,12 +99,17 @@ jobs:
 
           echo "FINAL_STATUS=$STATUS" >> "$GITHUB_OUTPUT"
 
-          if [[ "$STATUS" == "UNKNOWN" || "$STATUS" == "RUNNING" || "$STATUS" == "STARTING" ]]; then
-            echo "Timed out waiting for a terminal Glue state."
-            exit 1
-          fi
+          case "$STATUS" in
+            SUCCEEDED|FAILED|TIMEOUT|STOPPED|ERROR|EXPIRED)
+              echo "Glue reached terminal state: $STATUS"
+              ;;
+            *)
+              echo "Timed out waiting for Glue to finish."
+              exit 1
+              ;;
+          esac
 
-      - name: Print Run Details
+      - name: Print Glue Run Details
         if: always() && steps.start.outputs.JOB_RUN_ID != ''
         env:
           JOB_RUN_ID: ${{ steps.start.outputs.JOB_RUN_ID }}
@@ -98,33 +120,48 @@ jobs:
             --job-name "$GLUE_JOB_NAME" \
             --run-id "$JOB_RUN_ID" \
             --region "$AWS_REGION" \
-            --query 'JobRun.{State:JobRunState,Error:ErrorMessage,LogGroup:LogGroupName,Started:StartedOn,Completed:CompletedOn}' \
+            --query 'JobRun.{State:JobRunState,Error:ErrorMessage,LogGroup:LogGroupName,Started:StartedOn,Completed:CompletedOn,ExecutionTime:ExecutionTime}' \
             --output json
 
-      - name: Search Glue CloudWatch Logs
+      - name: Search Discovered Glue Logs
         if: always() && steps.start.outputs.JOB_RUN_ID != ''
+        env:
+          JOB_RUN_ID: ${{ steps.start.outputs.JOB_RUN_ID }}
         run: |
-          echo "===== SEARCHING /aws-glue/jobs ====="
+          echo "===== SEARCHING GLUE LOGS ====="
 
-          START_MS=$(( ($(date +%s) - 3600) * 1000 ))
+          START_MS=$(( ($(date +%s) - 7200) * 1000 ))
 
-          for PATTERN in \
-            '"SCRIPT STARTED"' \
-            '"SUCCESS"' \
-            '"ASSUME ROLE FAILED"' \
-            '"AccessDenied"' \
-            '"PracticeAssumeRoleTest"'; do
+          LOG_GROUPS=$(aws logs describe-log-groups \
+            --region "$AWS_REGION" \
+            --query "logGroups[?contains(logGroupName, 'glue') || contains(logGroupName, 'Glue')].logGroupName" \
+            --output text)
 
-            echo "===== PATTERN: $PATTERN ====="
+          if [[ -z "$LOG_GROUPS" || "$LOG_GROUPS" == "None" ]]; then
+            echo "No Glue-related CloudWatch log groups were found."
+          else
+            for LOG_GROUP in $LOG_GROUPS; do
+              echo "===== LOG GROUP: $LOG_GROUP ====="
 
-            aws logs filter-log-events \
-              --log-group-name "/aws-glue/jobs" \
-              --region "$AWS_REGION" \
-              --start-time "$START_MS" \
-              --filter-pattern "$PATTERN" \
-              --query 'events[].message' \
-              --output text || true
-          done
+              for PATTERN in \
+                '"SCRIPT STARTED"' \
+                '"SUCCESS"' \
+                '"ASSUME ROLE FAILED"' \
+                '"AccessDenied"' \
+                '"PracticeAssumeRoleTest"'; do
+
+                echo "----- Pattern: $PATTERN -----"
+
+                aws logs filter-log-events \
+                  --log-group-name "$LOG_GROUP" \
+                  --region "$AWS_REGION" \
+                  --start-time "$START_MS" \
+                  --filter-pattern "$PATTERN" \
+                  --query 'events[].message' \
+                  --output text || true
+              done
+            done
+          fi
 
       - name: Report Result
         if: always() && steps.start.outputs.JOB_RUN_ID != ''
@@ -135,7 +172,7 @@ jobs:
           echo "Glue status: $FINAL_STATUS"
 
           if [[ "$FINAL_STATUS" == "SUCCEEDED" ]]; then
-            echo "Glue succeeded. Check the configured role and CloudWatch output to determine why AssumeRole was allowed."
+            echo "Glue succeeded. Inspect the discovered logs to determine whether the AssumeRole test ran."
           else
-            echo "Glue did not succeed. Review the run details and CloudWatch messages above."
+            echo "Glue did not succeed. Inspect the run error and discovered logs."
           fi
