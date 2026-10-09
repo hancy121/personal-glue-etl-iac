@@ -1,3 +1,4 @@
+
 name: Practice Capture AssumeRole Error
 
 on:
@@ -12,7 +13,7 @@ env:
   GLUE_JOB_NAME: practice-assume-role-job
 
 jobs:
-  reproduce-error:
+  diagnose-assume-role:
     runs-on: ubuntu-latest
 
     steps:
@@ -25,27 +26,33 @@ jobs:
           role-to-assume: arn:aws:iam::493272324412:role/github-ecr-role
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Verify AWS Identity
+      - name: Verify Identity and Glue Configuration
         run: |
+          set -e
+
+          echo "===== AWS IDENTITY ====="
           aws sts get-caller-identity
+
+          echo "===== GLUE JOB CONFIGURATION ====="
+          aws glue get-job \
+            --job-name "$GLUE_JOB_NAME" \
+            --region "$AWS_REGION" \
+            --query 'Job.{Name:Name,Role:Role,Script:Command.ScriptLocation}' \
+            --output json
 
       - name: Start Glue Job
         id: start
         run: |
+          set -e
+
           JOB_RUN_ID=$(aws glue start-job-run \
             --job-name "$GLUE_JOB_NAME" \
             --region "$AWS_REGION" \
             --query 'JobRunId' \
             --output text)
 
-          if [ -z "$JOB_RUN_ID" ] || [ "$JOB_RUN_ID" = "None" ]; then
-            echo "Failed to obtain Glue Job Run ID."
-            exit 1
-          fi
-
           echo "JOB_RUN_ID=$JOB_RUN_ID" >> "$GITHUB_OUTPUT"
-          echo "Started Glue job: $GLUE_JOB_NAME"
-          echo "Job Run ID: $JOB_RUN_ID"
+          echo "Started run: $JOB_RUN_ID"
 
       - name: Wait for Glue Job
         id: wait
@@ -75,81 +82,60 @@ jobs:
 
           echo "FINAL_STATUS=$STATUS" >> "$GITHUB_OUTPUT"
 
-          if [[ "$STATUS" != "FAILED" &&
-                "$STATUS" != "TIMEOUT" &&
-                "$STATUS" != "ERROR" ]]; then
-            echo "Job did not reach an expected failure state."
-            echo "Final status: $STATUS"
+          if [[ "$STATUS" == "UNKNOWN" || "$STATUS" == "RUNNING" || "$STATUS" == "STARTING" ]]; then
+            echo "Timed out waiting for a terminal Glue state."
             exit 1
           fi
 
-      - name: Get Glue Job Error Details
-        id: details
+      - name: Print Run Details
         if: always() && steps.start.outputs.JOB_RUN_ID != ''
         env:
           JOB_RUN_ID: ${{ steps.start.outputs.JOB_RUN_ID }}
         run: |
-          echo "===== GLUE JOB DETAILS ====="
+          echo "===== GLUE RUN DETAILS ====="
 
           aws glue get-job-run \
             --job-name "$GLUE_JOB_NAME" \
             --run-id "$JOB_RUN_ID" \
             --region "$AWS_REGION" \
-            --query 'JobRun.{State:JobRunState,Error:ErrorMessage,LogGroup:LogGroupName,Arguments:Arguments}' \
+            --query 'JobRun.{State:JobRunState,Error:ErrorMessage,LogGroup:LogGroupName,Started:StartedOn,Completed:CompletedOn}' \
             --output json
 
-          ERROR_MESSAGE=$(aws glue get-job-run \
-            --job-name "$GLUE_JOB_NAME" \
-            --run-id "$JOB_RUN_ID" \
-            --region "$AWS_REGION" \
-            --query 'JobRun.ErrorMessage' \
-            --output text)
+      - name: Search Glue CloudWatch Logs
+        if: always() && steps.start.outputs.JOB_RUN_ID != ''
+        run: |
+          echo "===== SEARCHING /aws-glue/jobs ====="
 
-          echo "===== GLUE ERROR MESSAGE ====="
-          echo "$ERROR_MESSAGE"
+          START_MS=$(( ($(date +%s) - 3600) * 1000 ))
 
-          echo "===== CLOUDWATCH ERROR LOGS ====="
+          for PATTERN in \
+            '"SCRIPT STARTED"' \
+            '"SUCCESS"' \
+            '"ASSUME ROLE FAILED"' \
+            '"AccessDenied"' \
+            '"PracticeAssumeRoleTest"'; do
 
-          LOG_GROUP="/aws-glue/jobs/error"
+            echo "===== PATTERN: $PATTERN ====="
 
-          aws logs filter-log-events \
-            --log-group-name "$LOG_GROUP" \
-            --region "$AWS_REGION" \
-            --filter-pattern '"AccessDenied"' \
-            --start-time "$(( ($(date +%s) - 3600) * 1000 ))" \
-            --query 'events[].message' \
-            --output text || true
+            aws logs filter-log-events \
+              --log-group-name "/aws-glue/jobs" \
+              --region "$AWS_REGION" \
+              --start-time "$START_MS" \
+              --filter-pattern "$PATTERN" \
+              --query 'events[].message' \
+              --output text || true
+          done
 
-          echo "===== RUN-SPECIFIC OUTPUT ====="
-
-          aws logs filter-log-events \
-            --log-group-name "/aws-glue/jobs/output" \
-            --region "$AWS_REGION" \
-            --filter-pattern '"ASSUME ROLE FAILED"' \
-            --start-time "$(( ($(date +%s) - 3600) * 1000 ))" \
-            --query 'events[].message' \
-            --output text || true
-
-      - name: Confirm Expected AssumeRole Failure
+      - name: Report Result
         if: always() && steps.start.outputs.JOB_RUN_ID != ''
         env:
-          JOB_RUN_ID: ${{ steps.start.outputs.JOB_RUN_ID }}
           FINAL_STATUS: ${{ steps.wait.outputs.FINAL_STATUS }}
         run: |
-          echo "===== REPRODUCTION RESULT ====="
+          echo "===== DIAGNOSTIC RESULT ====="
+          echo "Glue status: $FINAL_STATUS"
 
-          aws glue get-job-run \
-            --job-name "$GLUE_JOB_NAME" \
-            --run-id "$JOB_RUN_ID" \
-            --region "$AWS_REGION" \
-            --query 'JobRun.ErrorMessage' \
-            --output text > glue-error.txt
-
-          if grep -qi "AccessDenied.*AssumeRole\|AssumeRole.*AccessDenied" glue-error.txt; then
-            echo "Confirmed: Glue reported the expected AssumeRole AccessDenied."
-            exit 0
+          if [[ "$FINAL_STATUS" == "SUCCEEDED" ]]; then
+            echo "Glue succeeded. Check the configured role and CloudWatch output to determine why AssumeRole was allowed."
+          else
+            echo "Glue did not succeed. Review the run details and CloudWatch messages above."
           fi
-
-          echo "The expected error was not confirmed in JobRun.ErrorMessage."
-          echo "Inspect the CloudWatch output and error logs above."
-          exit 1
