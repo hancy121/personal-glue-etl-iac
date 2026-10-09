@@ -8,7 +8,6 @@ permissions:
   contents: read
 
 env:
-  # Glue job is running in us-east-1
   AWS_REGION: us-east-1
   GLUE_JOB_NAME: practice-assume-role-job
 
@@ -27,7 +26,8 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Verify AWS Identity
-        run: aws sts get-caller-identity
+        run: |
+          aws sts get-caller-identity
 
       - name: Start Glue Job
         id: start
@@ -38,17 +38,23 @@ jobs:
             --query 'JobRunId' \
             --output text)
 
+          if [ -z "$JOB_RUN_ID" ] || [ "$JOB_RUN_ID" = "None" ]; then
+            echo "Failed to obtain Glue Job Run ID."
+            exit 1
+          fi
+
           echo "JOB_RUN_ID=$JOB_RUN_ID" >> "$GITHUB_OUTPUT"
           echo "Started Glue job: $GLUE_JOB_NAME"
           echo "Job Run ID: $JOB_RUN_ID"
 
-      - name: Wait for Glue Job and Capture Error
+      - name: Wait for Glue Job
+        id: wait
         env:
           JOB_RUN_ID: ${{ steps.start.outputs.JOB_RUN_ID }}
         run: |
-          echo "Waiting for Glue job to finish..."
+          STATUS="UNKNOWN"
 
-          for attempt in $(seq 1 180); do
+          for attempt in $(seq 1 90); do
             STATUS=$(aws glue get-job-run \
               --job-name "$GLUE_JOB_NAME" \
               --run-id "$JOB_RUN_ID" \
@@ -58,26 +64,40 @@ jobs:
 
             echo "Attempt $attempt: $STATUS"
 
-            if [ "$STATUS" = "SUCCEEDED" ]; then
-              echo "Unexpected result: Glue job succeeded."
-              echo "The AssumeRole failure was not reproduced."
-              exit 1
-            fi
-
-            if [ "$STATUS" = "FAILED" ] || \
-               [ "$STATUS" = "TIMEOUT" ] || \
-               [ "$STATUS" = "STOPPED" ] || \
-               [ "$STATUS" = "ERROR" ]; then
-              break
-            fi
+            case "$STATUS" in
+              SUCCEEDED|FAILED|TIMEOUT|STOPPED|ERROR|EXPIRED)
+                break
+                ;;
+            esac
 
             sleep 10
           done
 
-          echo "===== FINAL GLUE STATUS ====="
-          echo "$STATUS"
+          echo "FINAL_STATUS=$STATUS" >> "$GITHUB_OUTPUT"
 
-          echo "===== GLUE ERROR MESSAGE ====="
+          if [[ "$STATUS" != "FAILED" &&
+                "$STATUS" != "TIMEOUT" &&
+                "$STATUS" != "ERROR" ]]; then
+            echo "Job did not reach an expected failure state."
+            echo "Final status: $STATUS"
+            exit 1
+          fi
+
+      - name: Get Glue Job Error Details
+        id: details
+        if: always() && steps.start.outputs.JOB_RUN_ID != ''
+        env:
+          JOB_RUN_ID: ${{ steps.start.outputs.JOB_RUN_ID }}
+        run: |
+          echo "===== GLUE JOB DETAILS ====="
+
+          aws glue get-job-run \
+            --job-name "$GLUE_JOB_NAME" \
+            --run-id "$JOB_RUN_ID" \
+            --region "$AWS_REGION" \
+            --query 'JobRun.{State:JobRunState,Error:ErrorMessage,LogGroup:LogGroupName,Arguments:Arguments}' \
+            --output json
+
           ERROR_MESSAGE=$(aws glue get-job-run \
             --job-name "$GLUE_JOB_NAME" \
             --run-id "$JOB_RUN_ID" \
@@ -85,29 +105,51 @@ jobs:
             --query 'JobRun.ErrorMessage' \
             --output text)
 
+          echo "===== GLUE ERROR MESSAGE ====="
           echo "$ERROR_MESSAGE"
 
           echo "===== CLOUDWATCH ERROR LOGS ====="
 
+          LOG_GROUP="/aws-glue/jobs/error"
+
           aws logs filter-log-events \
-            --log-group-name "/aws-glue/jobs/error" \
+            --log-group-name "$LOG_GROUP" \
             --region "$AWS_REGION" \
             --filter-pattern '"AccessDenied"' \
-            --start-time "$(( ($(date +%s) - 1800) * 1000 ))" \
+            --start-time "$(( ($(date +%s) - 3600) * 1000 ))" \
             --query 'events[].message' \
             --output text || true
 
-          if [ "$STATUS" != "FAILED" ]; then
-            echo "The job did not end in FAILED state."
-            exit 1
-          fi
+          echo "===== RUN-SPECIFIC OUTPUT ====="
 
-          if [[ "$ERROR_MESSAGE" == *"AccessDenied"* ]] && \
-             [[ "$ERROR_MESSAGE" == *"AssumeRole"* ]]; then
-            echo "SUCCESS: Reproduced the AssumeRole AccessDenied error."
+          aws logs filter-log-events \
+            --log-group-name "/aws-glue/jobs/output" \
+            --region "$AWS_REGION" \
+            --filter-pattern '"ASSUME ROLE FAILED"' \
+            --start-time "$(( ($(date +%s) - 3600) * 1000 ))" \
+            --query 'events[].message' \
+            --output text || true
+
+      - name: Confirm Expected AssumeRole Failure
+        if: always() && steps.start.outputs.JOB_RUN_ID != ''
+        env:
+          JOB_RUN_ID: ${{ steps.start.outputs.JOB_RUN_ID }}
+          FINAL_STATUS: ${{ steps.wait.outputs.FINAL_STATUS }}
+        run: |
+          echo "===== REPRODUCTION RESULT ====="
+
+          aws glue get-job-run \
+            --job-name "$GLUE_JOB_NAME" \
+            --run-id "$JOB_RUN_ID" \
+            --region "$AWS_REGION" \
+            --query 'JobRun.ErrorMessage' \
+            --output text > glue-error.txt
+
+          if grep -qi "AccessDenied.*AssumeRole\|AssumeRole.*AccessDenied" glue-error.txt; then
+            echo "Confirmed: Glue reported the expected AssumeRole AccessDenied."
             exit 0
           fi
 
-          echo "Glue failed, but the expected AssumeRole error was not confirmed."
+          echo "The expected error was not confirmed in JobRun.ErrorMessage."
+          echo "Inspect the CloudWatch output and error logs above."
           exit 1
-```
