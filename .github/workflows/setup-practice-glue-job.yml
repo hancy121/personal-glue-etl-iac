@@ -144,6 +144,8 @@ jobs:
             # Name belongs in --job-name, not inside JobUpdate.
             jq 'del(.Name)' job-definition.json > job-update.json
 
+            jq 'del(.Name)' job-definition.json > job-update.json
+
             aws glue update-job \
               --job-name "$JOB_NAME" \
               --job-update file://job-update.json
