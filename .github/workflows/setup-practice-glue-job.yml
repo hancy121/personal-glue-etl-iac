@@ -21,14 +21,14 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Authenticate to your personal AWS account
+      # 1. Authenticate to personal AWS
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::493272324412:role/github-ecr-role
           aws-region: us-east-1
 
-      # 2. Verify the AWS account
+      # 2. Verify AWS account
       - name: Verify AWS account
         shell: bash
         run: |
@@ -139,12 +139,18 @@ jobs:
           if aws glue get-job \
             --job-name "$JOB_NAME" >/dev/null 2>&1; then
 
-            echo "Existing Glue job found. Updating configuration."
+            echo "Existing Glue job found. Preparing update."
 
-            # Name belongs in --job-name, not inside JobUpdate.
+            # Remove Name from JobUpdate.
             jq 'del(.Name)' job-definition.json > job-update.json
 
-            jq 'del(.Name)' job-definition.json > job-update.json
+            echo "===== UPDATE DOCUMENT KEYS ====="
+            jq 'keys' job-update.json
+
+            if jq -e 'has("Name")' job-update.json >/dev/null; then
+              echo "ERROR: Name must not be inside JobUpdate."
+              exit 1
+            fi
 
             aws glue update-job \
               --job-name "$JOB_NAME" \
@@ -161,7 +167,7 @@ jobs:
             echo "Created Glue job: $JOB_NAME"
           fi
 
-      # 6. Verify the final Glue job configuration
+      # 6. Verify the Glue job configuration
       - name: Verify Glue job
         shell: bash
         run: |
