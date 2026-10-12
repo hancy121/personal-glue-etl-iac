@@ -1,0 +1,166 @@
+name: Test IAM Permissions (Non-Destructive)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/test_iam_role_permissions.yml"
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  SOURCE_ACCOUNT_ID: "493272324412"
+  ROLE_NAME: practice-glue-role
+  POLICY_NAME: glue-job-inline-policy
+  TARGET_ROLE_ARN: arn:aws:iam::493272324412:role/practice-redshift-s3-role
+
+jobs:
+  update-role:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::493272324412:role/github-ecr-role
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS Identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          echo "Authenticated AWS account: $ACCOUNT"
+          test "$ACCOUNT" = "$SOURCE_ACCOUNT_ID" || {
+            echo "ERROR: Unexpected AWS account"
+            exit 1
+          }
+
+      - name: Fetch Existing Inline Policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws iam get-role-policy \
+            --role-name "$ROLE_NAME" \
+            --policy-name "$POLICY_NAME" \
+            --query PolicyDocument \
+            --output json > existing-policy.json
+
+          jq -e '
+            .Version == "2012-10-17" and
+            ((.Statement | type) == "array" or
+             (.Statement | type) == "object")
+          ' existing-policy.json >/dev/null
+
+          echo "Existing policy retrieved."
+
+      - name: Build New Permission
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > new-permission.json <<'JSON'
+          [
+            {
+              "Sid": "AssumePracticeTargetRole",
+              "Effect": "Allow",
+              "Action": "sts:AssumeRole",
+              "Resource": "arn:aws:iam::493272324412:role/practice-redshift-s3-role"
+            }
+          ]
+          JSON
+
+      - name: Combine Existing and New Permissions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          jq --slurpfile additions new-permission.json '
+            .Statement = (
+              (
+                if (.Statement | type) == "array"
+                then .Statement
+                else [.Statement]
+                end
+              )
+              | map(select((.Sid // "") != "AssumePracticeTargetRole"))
+              + $additions[0]
+            )
+          ' existing-policy.json > updated-policy.json
+
+          jq -e --arg target "$TARGET_ROLE_ARN" '
+            ([.Statement[] |
+              select(
+                .Sid == "AssumePracticeTargetRole" and
+                .Effect == "Allow" and
+                .Action == "sts:AssumeRole" and
+                .Resource == $target
+              )] | length) == 1
+          ' updated-policy.json >/dev/null
+
+          echo "Combined policy validated."
+
+      - name: Verify Existing Permissions Are Preserved
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          jq -e '
+            any(.Statement[]; .Sid == "ListAnalyticsBuckets") and
+            any(.Statement[]; .Sid == "ReadAnalyticsObjects") and
+            any(.Statement[]; .Sid == "InvokeLambda") and
+            any(.Statement[]; .Sid == "ReadElasticityObjects") and
+            ([.Statement[] |
+              select(.Sid == "AssumePracticeTargetRole")] | length) == 1
+          ' updated-policy.json >/dev/null
+
+          echo "Existing S3/Lambda statements preserved."
+
+      - name: Apply Updated Inline Policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws iam put-role-policy \
+            --role-name "$ROLE_NAME" \
+            --policy-name "$POLICY_NAME" \
+            --policy-document file://updated-policy.json
+
+          echo "Updated policy applied."
+
+      - name: Verify Applied Policy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          aws iam get-role-policy \
+            --role-name "$ROLE_NAME" \
+            --policy-name "$POLICY_NAME" \
+            --query PolicyDocument \
+            --output json > applied-policy.json
+
+          jq -e --arg target "$TARGET_ROLE_ARN" '
+            any(.Statement[];
+              .Sid == "ListAnalyticsBuckets") and
+            any(.Statement[];
+              .Sid == "ReadAnalyticsObjects") and
+            any(.Statement[];
+              .Sid == "InvokeLambda") and
+            any(.Statement[];
+              .Sid == "ReadElasticityObjects") and
+            ([.Statement[] |
+              select(
+                .Sid == "AssumePracticeTargetRole" and
+                .Effect == "Allow" and
+                .Action == "sts:AssumeRole" and
+                .Resource == $target
+              )] | length) == 1
+          ' applied-policy.json >/dev/null
+
+          echo "SUCCESS: Existing permissions preserved; AssumeRole verified."
