@@ -1,1 +1,120 @@
+name: Setup Practice IAM
 
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  setup-iam:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::493272324412:role/github-ecr-role
+          aws-region: us-east-1
+
+      - name: Verify AWS account
+        shell: bash
+        run: |
+          set -e
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          if [ "$ACCOUNT" != "493272324412" ]; then
+            echo "Wrong AWS account. Stopping."
+            exit 1
+          fi
+          echo "Verified personal AWS account: $ACCOUNT"
+
+      - name: Create target role
+        shell: bash
+        run: |
+          set -e
+          ROLE_NAME="practice-redshift-s3-role"
+
+          cat > target-trust.json <<'JSON'
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Principal": {
+                  "AWS": "arn:aws:iam::493272324412:root"
+                },
+                "Action": "sts:AssumeRole"
+              }
+            ]
+          }
+          JSON
+
+          if aws iam get-role --role-name "$ROLE_NAME" >/dev/null 2>&1; then
+            echo "Target role already exists."
+          else
+            aws iam create-role \
+              --role-name "$ROLE_NAME" \
+              --assume-role-policy-document file://target-trust.json
+            echo "Created target role."
+          fi
+
+      - name: Create Glue execution role
+        shell: bash
+        run: |
+          set -e
+          ROLE_NAME="practice-glue-role"
+
+          cat > glue-trust.json <<'JSON'
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Principal": {
+                  "Service": "glue.amazonaws.com"
+                },
+                "Action": "sts:AssumeRole"
+              }
+            ]
+          }
+          JSON
+
+          if aws iam get-role --role-name "$ROLE_NAME" >/dev/null 2>&1; then
+            echo "Glue execution role already exists."
+          else
+            aws iam create-role \
+              --role-name "$ROLE_NAME" \
+              --assume-role-policy-document file://glue-trust.json
+            echo "Created Glue execution role."
+          fi
+
+          aws iam attach-role-policy \
+            --role-name "$ROLE_NAME" \
+            --policy-arn arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+
+      - name: Add target-role permission to Glue role
+        shell: bash
+        run: |
+          set -e
+
+          cat > assume-target-policy.json <<'JSON'
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "AssumePracticeTargetRole",
+                "Effect": "Allow",
+                "Action": "sts:AssumeRole",
+                "Resource": "arn:aws:iam::493272324412:role/practice-redshift-s3-role"
+              }
+            ]
+          }
+          JSON
+
+          aws iam put-role-policy \
+            --role-name practice-glue-role \
+            --policy-name PracticeAssumeTargetRole \
+            --policy-document file://assume-target-policy.json
+
+          echo "Setup completed."
