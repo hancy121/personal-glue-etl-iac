@@ -1,0 +1,110 @@
+name: Update Production Glue Inline Policy
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - EA-Fleet-Analysis-Deploy-1
+    paths:
+      - ".github/workflows/update_prod_glue_inline_policy.yml"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  update-glue-policy:
+    environment: dev
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          # Must be an authorized deployment role in the
+          # production account (654654263141).
+          role-to-assume: ${{ vars.PROD_IAM_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-2
+
+      - name: Verify AWS Account
+        run: |
+          aws sts get-caller-identity
+          ACCOUNT=$(aws sts get-caller-identity \
+            --query Account --output text)
+          if [ "$ACCOUNT" != "654654263141" ]; then
+            echo "ERROR: Wrong AWS account: $ACCOUNT"
+            exit 1
+          fi
+
+      - name: Fetch Existing Inline Policy
+        run: |
+          aws iam get-role-policy \
+            --role-name AmazonSageMakerServiceCatalogProductsGlueRole \
+            --policy-name glue-job-inline-policy \
+            --query PolicyDocument \
+            --output json > existing-policy.json
+
+      - name: Merge Requested Permissions
+        run: |
+          cat > new-statements.json <<'EOF'
+          [
+            {
+              "Sid": "ListAnalyticsBuckets",
+              "Effect": "Allow",
+              "Action": "s3:ListBucket",
+              "Resource": [
+                "arn:aws:s3:::analytics-ea-ds-dev",
+                "arn:aws:s3:::analytics-ea-ds-pricing"
+              ]
+            },
+            {
+              "Sid": "ReadAnalyticsObjects",
+              "Effect": "Allow",
+              "Action": "s3:GetObject",
+              "Resource": [
+                "arn:aws:s3:::analytics-ea-ds-dev/*",
+                "arn:aws:s3:::analytics-ea-ds-pricing/*"
+              ]
+            },
+            {
+              "Sid": "InvokeLambda",
+              "Effect": "Allow",
+              "Action": "lambda:InvokeFunction",
+              "Resource": "*"
+            },
+            {
+              "Sid": "ReadElasticityObjects",
+              "Effect": "Allow",
+              "Action": "s3:GetObject",
+              "Resource": "arn:aws:s3:::analytics-ea-ds-pricing/ELASTICITY/*"
+            }
+          ]
+          EOF
+
+          jq --slurpfile additions new-statements.json '
+            .Statement = (
+              .Statement + [
+                $additions[0][] as $new |
+                select(
+                  ([.Statement[] | .Sid // ""] | index($new.Sid)) == null
+                ) |
+                $new
+              ]
+            )
+          ' existing-policy.json > updated-policy.json
+
+          echo "Reviewing updated policy:"
+          cat updated-policy.json
+
+      - name: Update Inline Policy
+        run: |
+          aws iam put-role-policy \
+            --role-name AmazonSageMakerServiceCatalogProductsGlueRole \
+            --policy-name glue-job-inline-policy \
+            --policy-document file://updated-policy.json
+
+      - name: Verify Policy
+        run: |
+          aws iam get-role-policy \
+            --role-name AmazonSageMakerServiceCatalogProductsGlueRole \
+            --policy-name glue-job-inline-policy
