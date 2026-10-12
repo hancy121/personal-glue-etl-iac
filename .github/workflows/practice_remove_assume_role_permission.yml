@@ -1,0 +1,119 @@
+
+      - name: Remove Only the Test AssumeRole Permission
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "===== VERIFYING AWS ACCOUNT ====="
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          echo "Connected account: $ACCOUNT"
+
+          if [ "$ACCOUNT" != "$ACCOUNT_ID" ]; then
+            echo "ERROR: Wrong AWS account. No changes made."
+            exit 1
+          fi
+
+          echo "===== FETCHING EXISTING POLICY ====="
+          aws iam get-role-policy \
+            --role-name "$ROLE_NAME" \
+            --policy-name "$POLICY_NAME" \
+            --query PolicyDocument \
+            --output json > existing-policy.json
+
+          echo "===== REMOVING TARGET ASSUMEROLE PERMISSION ====="
+
+          jq --arg target "$TARGET_ROLE" '
+            def actions:
+              if (.Action | type) == "array"
+              then .Action
+              else [.Action]
+              end;
+
+            def resources:
+              if (.Resource | type) == "array"
+              then .Resource
+              else [.Resource]
+              end;
+
+            .Statement |= map(
+              select(
+                (
+                  (actions | map(ascii_downcase) | index("sts:assumerole")) != null
+                  and
+                  (resources | index($target)) != null
+                ) | not
+              )
+            )
+          ' existing-policy.json > updated-policy.json
+
+          echo "===== CHECKING POLICY BEFORE UPDATE ====="
+
+          REMAINING=$(jq --arg target "$TARGET_ROLE" '
+            [
+              .Statement[] |
+              select(
+                (
+                  if (.Action | type) == "array"
+                  then .Action
+                  else [.Action]
+                  end
+                ) | any(ascii_downcase == "sts:assumerole")
+              ) |
+              select(
+                (
+                  if (.Resource | type) == "array"
+                  then .Resource
+                  else [.Resource]
+                  end
+                ) | any(. == $target)
+              )
+            ] | length
+          ' updated-policy.json)
+
+          if [ "$REMAINING" != "0" ]; then
+            echo "ERROR: Target permission still exists. No update made."
+            exit 1
+          fi
+
+          echo "===== APPLYING POLICY UPDATE ====="
+          aws iam put-role-policy \
+            --role-name "$ROLE_NAME" \
+            --policy-name "$POLICY_NAME" \
+            --policy-document file://updated-policy.json
+
+          echo "===== VERIFYING SAVED POLICY ====="
+          aws iam get-role-policy \
+            --role-name "$ROLE_NAME" \
+            --policy-name "$POLICY_NAME" \
+            --query PolicyDocument \
+            --output json > verified-policy.json
+
+          jq --arg target "$TARGET_ROLE" '
+            [
+              .Statement[] |
+              select(
+                (
+                  if (.Action | type) == "array"
+                  then .Action
+                  else [.Action]
+                  end
+                ) | any(ascii_downcase == "sts:assumerole")
+              ) |
+              select(
+                (
+                  if (.Resource | type) == "array"
+                  then .Resource
+                  else [.Resource]
+                  end
+                ) | any(. == $target)
+              )
+            ] | length
+          ' verified-policy.json > remaining-count.txt
+
+          if [ "$(cat remaining-count.txt)" != "0" ]; then
+            echo "ERROR: Permission still exists after update."
+            exit 1
+          fi
+
+          echo "SUCCESS: Target AssumeRole permission removed."
+          echo "Other policy statements preserved."
