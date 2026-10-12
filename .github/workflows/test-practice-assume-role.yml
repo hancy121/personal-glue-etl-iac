@@ -1,0 +1,73 @@
+name: Test Practice AssumeRole
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  run-glue-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::493272324412:role/github-ecr-role
+          aws-region: us-east-1
+
+      - name: Verify account
+        run: |
+          set -e
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          test "$ACCOUNT" = "493272324412"
+          echo "Verified account: $ACCOUNT"
+
+      - name: Start Glue job
+        id: start
+        run: |
+          RUN_ID=$(aws glue start-job-run \
+            --job-name practice-assume-role-job \
+            --query JobRunId \
+            --output text)
+
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "Started Glue run: $RUN_ID"
+
+      - name: Wait for Glue job
+        env:
+          RUN_ID: ${{ steps.start.outputs.run_id }}
+        run: |
+          set -e
+
+          for i in $(seq 1 40); do
+            STATE=$(aws glue get-job-run \
+              --job-name practice-assume-role-job \
+              --run-id "$RUN_ID" \
+              --query 'JobRun.JobRunState' \
+              --output text)
+
+            echo "Glue state: $STATE"
+
+            case "$STATE" in
+              SUCCEEDED)
+                echo "Glue job succeeded."
+                exit 0
+                ;;
+              FAILED|TIMEOUT|ERROR|STOPPED|EXPIRED)
+                aws glue get-job-run \
+                  --job-name practice-assume-role-job \
+                  --run-id "$RUN_ID" \
+                  --query 'JobRun.{State:JobRunState,Error:ErrorMessage,Logs:LogGroupName}' \
+                  --output json
+                exit 1
+                ;;
+            esac
+
+            sleep 15
+          done
+
+          echo "Timed out waiting for Glue job."
+          exit 1
