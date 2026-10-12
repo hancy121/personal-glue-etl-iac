@@ -24,12 +24,14 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # 1. Authenticate to personal AWS
       - name: Configure Personal AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::493272324412:role/github-ecr-role
           aws-region: us-east-1
 
+      # 2. Verify account
       - name: Verify AWS Identity
         shell: bash
         run: |
@@ -45,6 +47,7 @@ jobs:
 
           echo "Verified personal AWS account: $ACCOUNT"
 
+      # 3. Retrieve the existing inline policy
       - name: Fetch Existing Inline Policy
         shell: bash
         run: |
@@ -63,85 +66,124 @@ jobs:
 
             echo "Existing inline policy retrieved."
           else
-            echo "Policy does not exist. Creating an empty policy document."
+            echo "Inline policy not found; creating a new policy document."
             printf '%s\n' \
               '{"Version":"2012-10-17","Statement":[]}' \
               > existing-policy.json
           fi
 
-      - name: Remove AssumeRole Permission
+      # 4. Restore the required AssumeRole permission
+      - name: Build Updated Policy
         shell: bash
         run: |
           set -euo pipefail
 
-          # Preserve unrelated permissions.
-          # Remove the managed AssumeRole statement and any other
-          # Allow statement granting sts:AssumeRole on the target role.
-          jq --arg target "$TARGET_ROLE_ARN" '
-            .Statement = [
-              .Statement[]
-              | select(
-                  (
-                    .Sid // ""
-                  ) != "AssumePracticeTargetRole"
-                  and
-                  (
-                    .Effect != "Allow"
-                    or
+          cat > desired-permissions.json <<'JSON'
+          [
+            {
+              "Sid": "ListAnalyticsBuckets",
+              "Effect": "Allow",
+              "Action": "s3:ListBucket",
+              "Resource": [
+                "arn:aws:s3:::analytics-ea-ds-dev",
+                "arn:aws:s3:::analytics-ea-ds-pricing"
+              ]
+            },
+            {
+              "Sid": "ReadAnalyticsObjects",
+              "Effect": "Allow",
+              "Action": "s3:GetObject",
+              "Resource": [
+                "arn:aws:s3:::analytics-ea-ds-dev/*",
+                "arn:aws:s3:::analytics-ea-ds-pricing/*"
+              ]
+            },
+            {
+              "Sid": "InvokeLambda",
+              "Effect": "Allow",
+              "Action": "lambda:InvokeFunction",
+              "Resource": "*"
+            },
+            {
+              "Sid": "ReadElasticityObjects",
+              "Effect": "Allow",
+              "Action": "s3:GetObject",
+              "Resource": "arn:aws:s3:::analytics-ea-ds-pricing/ELASTICITY/*"
+            }
+          ]
+          JSON
+
+          # Remove previous workflow-managed statements and any
+          # direct AssumeRole Allow statement for the target.
+          # Preserve unrelated policy statements.
+          jq --arg target "$TARGET_ROLE_ARN" \
+             --slurpfile desired desired-permissions.json '
+            .Statement = (
+              [
+                .Statement[] as $s
+                | select(
                     (
-                      (
-                        if (.Action | type) == "array"
-                        then .Action
-                        else [.Action]
-                        end
-                      )
-                      | map(ascii_downcase)
-                      | index("sts:assumerole")
+                      [
+                        "ListAnalyticsBuckets",
+                        "ReadAnalyticsObjects",
+                        "InvokeLambda",
+                        "ReadElasticityObjects",
+                        "AssumePracticeTargetRole"
+                      ] | index($s.Sid // "")
                     ) == null
-                    or
+                    and
                     (
+                      $s.Effect != "Allow"
+                      or
                       (
-                        if (.Resource | type) == "array"
-                        then .Resource
-                        else [.Resource]
-                        end
-                      )
-                      | index($target)
-                    ) == null
+                        (
+                          if ($s.Action | type) == "array"
+                          then $s.Action
+                          else [$s.Action]
+                          end
+                        ) | map(ascii_downcase)
+                        | index("sts:assumerole")
+                      ) == null
+                      or
+                      (
+                        (
+                          if ($s.Resource | type) == "array"
+                          then $s.Resource
+                          else [$s.Resource]
+                          end
+                        ) | index($target)
+                      ) == null
+                    )
                   )
-                )
-            ]
+                | $s
+              ]
+              + $desired[0]
+              + [
+                  {
+                    "Sid": "AssumePracticeTargetRole",
+                    "Effect": "Allow",
+                    "Action": "sts:AssumeRole",
+                    "Resource": $target
+                  }
+                ]
+            )
           ' existing-policy.json > updated-policy.json
 
           echo "===== UPDATED POLICY ====="
           jq . updated-policy.json
 
-          if jq -e --arg target "$TARGET_ROLE_ARN" '
+          jq -e --arg target "$TARGET_ROLE_ARN" '
             any(.Statement[];
+              .Sid == "AssumePracticeTargetRole" and
               .Effect == "Allow" and
-              (
-                if (.Action | type) == "array"
-                then .Action
-                else [.Action]
-                end
-                | map(ascii_downcase)
-                | index("sts:assumerole")
-              ) != null and
-              (
-                if (.Resource | type) == "array"
-                then .Resource
-                else [.Resource]
-                end
-                | index($target)
-              ) != null
+              .Action == "sts:AssumeRole" and
+              .Resource == $target
             )
-          ' updated-policy.json >/dev/null; then
-            echo "ERROR: An AssumeRole grant to the target remains."
-            exit 1
-          fi
+          ' updated-policy.json >/dev/null
 
-          echo "Verified: No matching AssumeRole Allow statement remains in this inline policy."
+          echo "AssumeRole permission validated."
 
+      # 5. Apply the updated policy
       - name: Apply Updated Inline Policy
         shell: bash
         run: |
@@ -152,9 +194,10 @@ jobs:
             --policy-name "$POLICY_NAME" \
             --policy-document file://updated-policy.json
 
-          echo "Inline policy updated."
+          echo "Updated inline policy on $ROLE_NAME."
 
-      - name: Verify Applied Policy
+      # 6. Verify the permission was saved
+      - name: Verify Applied Permission
         shell: bash
         run: |
           set -euo pipefail
@@ -165,28 +208,13 @@ jobs:
             --query PolicyDocument \
             --output json > applied-policy.json
 
-          if jq -e --arg target "$TARGET_ROLE_ARN" '
+          jq -e --arg target "$TARGET_ROLE_ARN" '
             any(.Statement[];
+              .Sid == "AssumePracticeTargetRole" and
               .Effect == "Allow" and
-              (
-                if (.Action | type) == "array"
-                then .Action
-                else [.Action]
-                end
-                | map(ascii_downcase)
-                | index("sts:assumerole")
-              ) != null and
-              (
-                if (.Resource | type) == "array"
-                then .Resource
-                else [.Resource]
-                end
-                | index($target)
-              ) != null
+              .Action == "sts:AssumeRole" and
+              .Resource == $target
             )
-          ' applied-policy.json >/dev/null; then
-            echo "ERROR: AssumeRole permission still exists in this inline policy."
-            exit 1
-          fi
+          ' applied-policy.json >/dev/null
 
-          echo "SUCCESS: No matching AssumeRole Allow statement exists in glue-job-inline-policy."
+          echo "SUCCESS: AssumeRole permission restored and verified."
