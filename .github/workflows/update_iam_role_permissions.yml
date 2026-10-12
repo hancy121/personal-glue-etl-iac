@@ -1,0 +1,188 @@
+name: Update Personal Glue IAM Permissions
+
+"on":
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/update_iam_role_permissions.yml"
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  ACCOUNT_ID: "493272324412"
+  ROLE_NAME: practice-glue-role
+  POLICY_NAME: glue-job-inline-policy
+  TARGET_ROLE_ARN: arn:aws:iam::493272324412:role/practice-redshift-s3-role
+
+jobs:
+  update-role:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure Personal AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::493272324412:role/github-ecr-role
+          aws-region: us-east-1
+
+      - name: Verify AWS Identity
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ACCOUNT=$(aws sts get-caller-identity \
+            --query Account --output text)
+
+          if [ "$ACCOUNT" != "$ACCOUNT_ID" ]; then
+            echo "ERROR: Unexpected AWS account: $ACCOUNT"
+            exit 1
+          fi
+
+          aws sts get-caller-identity
+          echo "Personal AWS account verified."
+
+      - name: Fetch Existing Inline Policy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if aws iam get-role-policy \
+            --role-name "$ROLE_NAME" \
+            --policy-name "$POLICY_NAME" \
+            --query PolicyDocument \
+            --output json > existing-policy.json 2>/dev/null; then
+
+            jq -e '
+              .Version == "2012-10-17" and
+              (.Statement | type == "array")
+            ' existing-policy.json >/dev/null
+
+            echo "Existing inline policy retrieved."
+          else
+            echo "Policy does not exist yet; creating a new one."
+            printf '%s\n' \
+              '{"Version":"2012-10-17","Statement":[]}' \
+              > existing-policy.json
+          fi
+
+      - name: Build Updated Policy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > desired-permissions.json <<'JSON'
+          [
+            {
+              "Sid": "ListAnalyticsBuckets",
+              "Effect": "Allow",
+              "Action": "s3:ListBucket",
+              "Resource": [
+                "arn:aws:s3:::analytics-ea-ds-dev",
+                "arn:aws:s3:::analytics-ea-ds-pricing"
+              ]
+            },
+            {
+              "Sid": "ReadAnalyticsObjects",
+              "Effect": "Allow",
+              "Action": "s3:GetObject",
+              "Resource": [
+                "arn:aws:s3:::analytics-ea-ds-dev/*",
+                "arn:aws:s3:::analytics-ea-ds-pricing/*"
+              ]
+            },
+            {
+              "Sid": "InvokeLambda",
+              "Effect": "Allow",
+              "Action": "lambda:InvokeFunction",
+              "Resource": "*"
+            },
+            {
+              "Sid": "ReadElasticityObjects",
+              "Effect": "Allow",
+              "Action": "s3:GetObject",
+              "Resource": "arn:aws:s3:::analytics-ea-ds-pricing/ELASTICITY/*"
+            },
+            {
+              "Sid": "AssumePracticeTargetRole",
+              "Effect": "Allow",
+              "Action": "sts:AssumeRole",
+              "Resource": "arn:aws:iam::493272324412:role/practice-redshift-s3-role"
+            }
+          ]
+          JSON
+
+          # Replace statements managed by this workflow.
+          # Preserve all unrelated statements.
+          jq --slurpfile desired desired-permissions.json '
+            .Statement = (
+              [
+                .Statement[] as $s
+                | select(
+                    (
+                      [
+                        "ListAnalyticsBuckets",
+                        "ReadAnalyticsObjects",
+                        "InvokeLambda",
+                        "ReadElasticityObjects",
+                        "AssumePracticeTargetRole"
+                      ]
+                      | index($s.Sid // "")
+                    ) == null
+                  )
+                | $s
+              ] + $desired[0]
+            )
+          ' existing-policy.json > updated-policy.json
+
+          echo "===== POLICY REVIEW ====="
+          jq . updated-policy.json
+
+          jq -e --arg target "$TARGET_ROLE_ARN" '
+            any(.Statement[];
+              .Sid == "AssumePracticeTargetRole" and
+              .Effect == "Allow" and
+              .Action == "sts:AssumeRole" and
+              .Resource == $target
+            )
+          ' updated-policy.json >/dev/null
+
+          echo "Policy validated."
+
+      - name: Apply Updated Inline Policy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          aws iam put-role-policy \
+            --role-name "$ROLE_NAME" \
+            --policy-name "$POLICY_NAME" \
+            --policy-document file://updated-policy.json
+
+          echo "Inline policy updated."
+
+      - name: Verify Applied Permission
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          aws iam get-role-policy \
+            --role-name "$ROLE_NAME" \
+            --policy-name "$POLICY_NAME" \
+            --query PolicyDocument \
+            --output json > applied-policy.json
+
+          jq -e --arg target "$TARGET_ROLE_ARN" '
+            any(.Statement[];
+              .Sid == "AssumePracticeTargetRole" and
+              .Effect == "Allow" and
+              .Action == "sts:AssumeRole" and
+              .Resource == $target
+            )
+          ' applied-policy.json >/dev/null
+
+          echo "SUCCESS: Personal AssumeRole permission verified."
