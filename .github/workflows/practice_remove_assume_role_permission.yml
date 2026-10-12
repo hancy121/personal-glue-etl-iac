@@ -26,16 +26,25 @@ jobs:
           role-to-assume: arn:aws:iam::493272324412:role/github-ecr-role
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Remove Test AssumeRole Permission
+      - name: Verify Personal AWS Account
         shell: bash
         run: |
           set -euo pipefail
 
-          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          ACCOUNT=$(aws sts get-caller-identity \
+            --query Account --output text)
+
+          echo "Connected AWS account: $ACCOUNT"
+
           if [ "$ACCOUNT" != "$ACCOUNT_ID" ]; then
             echo "Wrong AWS account. Stopping."
             exit 1
           fi
+
+      - name: Remove Test AssumeRole Permission
+        shell: bash
+        run: |
+          set -euo pipefail
 
           aws iam get-role-policy \
             --role-name "$ROLE_NAME" \
@@ -45,9 +54,16 @@ jobs:
 
           jq --arg target "$TARGET_ROLE" '
             def actions:
-              if (.Action | type) == "array" then .Action else [.Action] end;
+              if (.Action | type) == "array"
+              then .Action
+              else [.Action]
+              end;
+
             def resources:
-              if (.Resource | type) == "array" then .Resource else [.Resource] end;
+              if (.Resource | type) == "array"
+              then .Resource
+              else [.Resource]
+              end;
 
             .Statement |= map(
               select(
@@ -75,12 +91,20 @@ jobs:
             [
               .Statement[] |
               select(
-                (if (.Action | type) == "array" then .Action else [.Action] end)
-                | any(ascii_downcase == "sts:assumerole")
+                (
+                  if (.Action | type) == "array"
+                  then .Action
+                  else [.Action]
+                  end
+                ) | any(ascii_downcase == "sts:assumerole")
               ) |
               select(
-                (if (.Resource | type) == "array" then .Resource else [.Resource] end)
-                | any(. == $target)
+                (
+                  if (.Resource | type) == "array"
+                  then .Resource
+                  else [.Resource]
+                  end
+                ) | any(. == $target)
               )
             ] | length
           ' verified-policy.json)
@@ -92,3 +116,70 @@ jobs:
 
           echo "SUCCESS: Target AssumeRole permission removed."
           echo "Other policy statements preserved."
+
+      - name: Inspect Remaining AssumeRole Permissions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "===== INLINE POLICY ====="
+          aws iam get-role-policy \
+            --role-name "$ROLE_NAME" \
+            --policy-name "$POLICY_NAME" \
+            --query PolicyDocument \
+            --output json
+
+          echo "===== ATTACHED MANAGED POLICIES ====="
+          aws iam list-attached-role-policies \
+            --role-name "$ROLE_NAME" \
+            --output table
+
+          echo "===== ALL INLINE POLICY NAMES ====="
+          aws iam list-role-policies \
+            --role-name "$ROLE_NAME" \
+            --output table
+
+          echo "===== OTHER INLINE POLICY DOCUMENTS ====="
+          for POLICY in $(aws iam list-role-policies \
+            --role-name "$ROLE_NAME" \
+            --query 'PolicyNames[]' --output text); do
+
+            if [ "$POLICY" != "$POLICY_NAME" ]; then
+              echo "----- $POLICY -----"
+              aws iam get-role-policy \
+                --role-name "$ROLE_NAME" \
+                --policy-name "$POLICY" \
+                --query PolicyDocument \
+                --output json
+            fi
+          done
+
+          echo "===== TARGET ROLE TRUST POLICY ====="
+          aws iam get-role \
+            --role-name practice-redshift-s3-role \
+            --query 'Role.AssumeRolePolicyDocument' \
+            --output json
+
+      - name: Inspect Attached Managed Policy Documents
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for ARN in $(aws iam list-attached-role-policies \
+            --role-name "$ROLE_NAME" \
+            --query 'AttachedPolicies[].PolicyArn' \
+            --output text); do
+
+            echo "===== MANAGED POLICY: $ARN ====="
+
+            VERSION=$(aws iam get-policy \
+              --policy-arn "$ARN" \
+              --query 'Policy.DefaultVersionId' \
+              --output text)
+
+            aws iam get-policy-version \
+              --policy-arn "$ARN" \
+              --version-id "$VERSION" \
+              --query 'PolicyVersion.Document' \
+              --output json
+          done
