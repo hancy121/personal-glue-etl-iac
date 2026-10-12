@@ -21,26 +21,37 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # 1. Authenticate to your personal AWS account
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::493272324412:role/github-ecr-role
           aws-region: us-east-1
 
+      # 2. Verify the AWS account
       - name: Verify AWS account
         shell: bash
         run: |
-          set -e
-          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
-          test "$ACCOUNT" = "$ACCOUNT_ID"
-          echo "Verified account: $ACCOUNT"
+          set -euo pipefail
 
+          ACCOUNT=$(aws sts get-caller-identity \
+            --query Account \
+            --output text)
+
+          if [ "$ACCOUNT" != "$ACCOUNT_ID" ]; then
+            echo "ERROR: Unexpected AWS account: $ACCOUNT"
+            exit 1
+          fi
+
+          echo "Verified personal AWS account: $ACCOUNT"
+
+      # 3. Create the AssumeRole test script
       - name: Create Glue test script
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
+
           cat > practice-assume-role-job.py <<'PY'
-          import sys
           import boto3
           from botocore.exceptions import ClientError
 
@@ -48,20 +59,38 @@ jobs:
               "arn:aws:iam::493272324412:role/practice-redshift-s3-role"
           )
 
-          print("===== PRACTICE ASSUME ROLE TEST STARTED =====", flush=True)
+          print(
+              "===== PRACTICE ASSUME ROLE TEST STARTED =====",
+              flush=True
+          )
 
           sts = boto3.client("sts", region_name="us-east-1")
 
-          print("Current Glue identity:", sts.get_caller_identity(), flush=True)
-          print("Attempting AssumeRole:", TARGET_ROLE_ARN, flush=True)
+          print(
+              "Current Glue identity:",
+              sts.get_caller_identity(),
+              flush=True
+          )
+
+          print(
+              "Attempting AssumeRole:",
+              TARGET_ROLE_ARN,
+              flush=True
+          )
 
           try:
               response = sts.assume_role(
                   RoleArn=TARGET_ROLE_ARN,
                   RoleSessionName="PracticeAssumeRoleTest"
               )
+
               print("===== ASSUME ROLE SUCCESS =====", flush=True)
-              print("Assumed role ARN:", response["AssumedRoleUser"]["Arn"], flush=True)
+              print(
+                  "Assumed role ARN:",
+                  response["AssumedRoleUser"]["Arn"],
+                  flush=True
+              )
+
           except ClientError as exc:
               print("===== ASSUME ROLE FAILED =====", flush=True)
               print("AWS error:", str(exc), flush=True)
@@ -70,17 +99,25 @@ jobs:
           print("===== SCRIPT FINISHED =====", flush=True)
           PY
 
+          python -m py_compile practice-assume-role-job.py
+          echo "Glue test script created and syntax-checked."
+
+      # 4. Upload the script to S3
       - name: Upload script to S3
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
+
           aws s3 cp practice-assume-role-job.py \
             "s3://${SCRIPT_BUCKET}/${SCRIPT_KEY}"
 
+          echo "Uploaded test script to S3."
+
+      # 5. Create or update the Glue job
       - name: Create or update Glue job
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           cat > job-definition.json <<JSON
           {
@@ -99,22 +136,61 @@ jobs:
           }
           JSON
 
-          if aws glue get-job --job-name "$JOB_NAME" >/dev/null 2>&1; then
+          if aws glue get-job \
+            --job-name "$JOB_NAME" >/dev/null 2>&1; then
+
+            echo "Existing Glue job found. Updating configuration."
+
+            # Name belongs in --job-name, not inside JobUpdate.
+            jq 'del(.Name)' job-definition.json > job-update.json
+
             aws glue update-job \
               --job-name "$JOB_NAME" \
-              --job-update file://job-definition.json
+              --job-update file://job-update.json
+
             echo "Updated Glue job: $JOB_NAME"
+
           else
+            echo "Glue job not found. Creating it."
+
             aws glue create-job \
               --cli-input-json file://job-definition.json
+
             echo "Created Glue job: $JOB_NAME"
           fi
 
+      # 6. Verify the final Glue job configuration
       - name: Verify Glue job
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
+
           aws glue get-job \
             --job-name "$JOB_NAME" \
             --query 'Job.{Name:Name,Role:Role,Script:Command.ScriptLocation,Version:GlueVersion}' \
             --output table
+
+          ACTUAL_ROLE=$(aws glue get-job \
+            --job-name "$JOB_NAME" \
+            --query 'Job.Role' \
+            --output text)
+
+          ACTUAL_SCRIPT=$(aws glue get-job \
+            --job-name "$JOB_NAME" \
+            --query 'Job.Command.ScriptLocation' \
+            --output text)
+
+          EXPECTED_ROLE="arn:aws:iam::${ACCOUNT_ID}:role/${GLUE_ROLE}"
+          EXPECTED_SCRIPT="s3://${SCRIPT_BUCKET}/${SCRIPT_KEY}"
+
+          if [ "$ACTUAL_ROLE" != "$EXPECTED_ROLE" ]; then
+            echo "ERROR: Unexpected Glue execution role: $ACTUAL_ROLE"
+            exit 1
+          fi
+
+          if [ "$ACTUAL_SCRIPT" != "$EXPECTED_SCRIPT" ]; then
+            echo "ERROR: Unexpected script location: $ACTUAL_SCRIPT"
+            exit 1
+          fi
+
+          echo "SUCCESS: Glue job configuration verified."
