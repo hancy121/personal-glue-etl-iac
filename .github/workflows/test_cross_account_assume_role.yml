@@ -1,0 +1,96 @@
+name: Test Cross-Account AssumeRole
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  SOURCE_ACCOUNT_ID: "493272324412"
+  SOURCE_ROLE_ARN: arn:aws:iam::493272324412:role/glue-assumerole-test-source
+  TARGET_ACCOUNT_ID: "784656681846"
+  TARGET_ROLE_ARN: arn:aws:iam::784656681846:role/redshift-assumerole-test-target
+
+jobs:
+  test-assume-role:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Authenticate using the existing GitHub OIDC role.
+      - name: Authenticate to Aditya AWS account
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::493272324412:role/github-ecr-role
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify GitHub OIDC identity
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ACCOUNT=$(aws sts get-caller-identity \
+            --query Account --output text)
+
+          echo "Authenticated AWS account: $ACCOUNT"
+
+          if [ "$ACCOUNT" != "$SOURCE_ACCOUNT_ID" ]; then
+            echo "::error::Unexpected AWS account: $ACCOUNT"
+            exit 1
+          fi
+
+      # Switch from the GitHub OIDC role to the dedicated source role.
+      # This requires source-role trust and permission for role chaining.
+      - name: Assume test source role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.SOURCE_ROLE_ARN }}
+          role-session-name: CrossAccountTestSource
+          aws-region: ${{ env.AWS_REGION }}
+          role-chaining: true
+
+      - name: Verify source role identity
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          IDENTITY=$(aws sts get-caller-identity)
+          echo "$IDENTITY"
+
+          ACCOUNT=$(echo "$IDENTITY" | python -c \
+            "import json,sys; print(json.load(sys.stdin)['Account'])")
+
+          if [ "$ACCOUNT" != "$SOURCE_ACCOUNT_ID" ]; then
+            echo "::error::Source role account mismatch"
+            exit 1
+          fi
+
+      # Expected to be denied until source permission and target trust
+      # are both configured correctly.
+      - name: Test cross-account AssumeRole
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          echo "Attempting to assume target role:"
+          echo "$TARGET_ROLE_ARN"
+
+          if aws sts assume-role \
+            --role-arn "$TARGET_ROLE_ARN" \
+            --role-session-name CrossAccountTargetTest \
+            --region ap-southeast-2 \
+            --duration-seconds 900; then
+
+            echo "::notice::AssumeRole succeeded."
+            echo "Both source authorization and target trust permit access."
+          else
+            STATUS=$?
+            echo "::warning::AssumeRole was denied."
+            echo "This is expected while required permissions or trust are missing."
+            exit "$STATUS"
+          fi
