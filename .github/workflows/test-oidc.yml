@@ -1,5 +1,5 @@
 
-name: Test GitHub OIDC
+name: Test AWS GitHub OIDC
 
 on:
   workflow_dispatch:
@@ -16,7 +16,7 @@ jobs:
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::493272324412:role/GitHubOIDCReproTestRole
+          role-to-assume: arn:aws:iam::493272324412:role/github-ecr-role
           aws-region: us-east-1
 
       - name: Verify AWS Identity
