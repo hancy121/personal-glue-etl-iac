@@ -27,7 +27,7 @@ Resources:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
               StringLike:
                 token.actions.githubusercontent.com:sub: !Sub
-                  - repo:${GitHubRepository}:ref:refs/heads/wrong-branch
+                  - repo:${GitHubRepository}:ref:refs/heads/main
                   - GitHubRepository: !Ref GitHubRepository
 
 Outputs:
