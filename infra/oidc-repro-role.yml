@@ -1,0 +1,36 @@
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Personal test role to reproduce GitHub OIDC authentication failure
+
+Parameters:
+  GitHubRepository:
+    Type: String
+    Default: hancy121/personal-glue-etl-iac
+
+Resources:
+  GitHubOIDCReproTestRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: GitHubOIDCReproTestRole
+      Description: Dedicated role for testing GitHub OIDC trust conditions
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub
+                - arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+                - {}
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Sub
+                  - repo:${GitHubRepository}:ref:refs/heads/wrong-branch
+                  - GitHubRepository: !Ref GitHubRepository
+
+Outputs:
+  TestRoleArn:
+    Description: Role ARN used by the test workflow
+    Value: !GetAtt GitHubOIDCReproTestRole.Arn
