@@ -1,11 +1,10 @@
+name: Update Personal Glue IAM Permissions
 
-name: Configure Glue and Redshift Access
-
-on:
+"on":
   workflow_dispatch:
   push:
     branches:
-      - EA-Fleet-Analysis-Deploy-1
+      - main
     paths:
       - ".github/workflows/update_iam_role_permissions.yml"
 
@@ -14,91 +13,235 @@ permissions:
   contents: read
 
 env:
-  AWS_REGION: us-east-2
-  SOURCE_ACCOUNT_ID: "654654263141"
-  TARGET_ACCOUNT_ID: "604349250746"
+  AWS_REGION: us-east-1
 
-  GLUE_ROLE_NAME: AmazonSageMakerServiceCatalogProductsGlueRole
-  GLUE_POLICY_NAME: glue-job-inline-policy
-  GLUE_ROLE_ARN: arn:aws:iam::654654263141:role/AmazonSageMakerServiceCatalogProductsGlueRole
+  # Aditya: source account
+  ACCOUNT_ID: "493272324412"
+  ROLE_NAME: practice-glue-role
+  POLICY_NAME: glue-job-inline-policy
 
-  REDSHIFT_ROLE_NAME: signet-role-Glue-To-Redshift
-  REDSHIFT_ROLE_ARN: arn:aws:iam::604349250746:role/signet-role-Glue-To-Redshift
+  # Hancy: target account
+  TARGET_ACCOUNT_ID: "784656681846"
+  TARGET_ROLE_NAME: redshift-assumerole-test-target
+  TARGET_ROLE_ARN: arn:aws:iam::784656681846:role/redshift-assumerole-test-target
+
+  # Role that Hancy's target role trusts
+  SOURCE_ROLE_ARN: arn:aws:iam::493272324412:role/glue-assumerole-test-source
 
 jobs:
-  configure-access:
+  update-role:
     runs-on: ubuntu-latest
-    environment: prod
 
     steps:
-      - name: Configure Production OIDC Credentials
+      # 1. Authenticate to Aditya's AWS account using GitHub OIDC
+      - name: Configure Personal AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::654654263141:role/signet-gha-eadse-oidc-role
-          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::493272324412:role/github-ecr-role
+          aws-region: us-east-1
 
-      - name: Verify Source Account
+      # 2. Verify source account
+      - name: Verify AWS Identity
         shell: bash
         run: |
           set -euo pipefail
-          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
-          test "$ACCOUNT" = "$SOURCE_ACCOUNT_ID"
-          echo "Source account verified."
 
-      # STEP 1: Add the new Redshift role to Glue's existing policy.
-      - name: Update Glue Inline Policy
+          ACCOUNT=$(aws sts get-caller-identity \
+            --query Account --output text)
+
+          if [ "$ACCOUNT" != "$ACCOUNT_ID" ]; then
+            echo "ERROR: Unexpected AWS account: $ACCOUNT"
+            exit 1
+          fi
+
+          echo "Verified personal AWS account: $ACCOUNT"
+
+      # 3. Retrieve the existing inline policy
+      - name: Fetch Existing Inline Policy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if aws iam get-role-policy \
+            --role-name "$ROLE_NAME" \
+            --policy-name "$POLICY_NAME" \
+            --query PolicyDocument \
+            --output json > existing-policy.json 2>policy-error.txt; then
+
+            jq -e '
+              .Version == "2012-10-17" and
+              (.Statement | type == "array")
+            ' existing-policy.json >/dev/null
+
+            echo "Existing inline policy retrieved."
+          else
+            if grep -q "NoSuchEntity" policy-error.txt; then
+              echo "Inline policy not found; creating a new policy document."
+              printf '%s\n' \
+                '{"Version":"2012-10-17","Statement":[]}' \
+                > existing-policy.json
+            else
+              cat policy-error.txt
+              echo "ERROR: Could not retrieve policy. Check IAM permissions."
+              exit 1
+            fi
+          fi
+
+      # 4. Preserve existing unrelated permissions and add AssumeRole
+      - name: Build Updated Policy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > desired-permissions.json <<'JSON'
+          [
+            {
+              "Sid": "ListAnalyticsBuckets",
+              "Effect": "Allow",
+              "Action": "s3:ListBucket",
+              "Resource": [
+                "arn:aws:s3:::analytics-ea-ds-dev",
+                "arn:aws:s3:::analytics-ea-ds-pricing"
+              ]
+            },
+            {
+              "Sid": "ReadAnalyticsObjects",
+              "Effect": "Allow",
+              "Action": "s3:GetObject",
+              "Resource": [
+                "arn:aws:s3:::analytics-ea-ds-dev/*",
+                "arn:aws:s3:::analytics-ea-ds-pricing/*"
+              ]
+            },
+            {
+              "Sid": "InvokeLambda",
+              "Effect": "Allow",
+              "Action": "lambda:InvokeFunction",
+              "Resource": "*"
+            },
+            {
+              "Sid": "ReadElasticityObjects",
+              "Effect": "Allow",
+              "Action": "s3:GetObject",
+              "Resource": "arn:aws:s3:::analytics-ea-ds-pricing/ELASTICITY/*"
+            }
+          ]
+          JSON
+
+          jq --arg target "$TARGET_ROLE_ARN" \
+             --slurpfile desired desired-permissions.json '
+            .Statement = (
+              [
+                .Statement[] as $s
+                | select(
+                    (
+                      [
+                        "ListAnalyticsBuckets",
+                        "ReadAnalyticsObjects",
+                        "InvokeLambda",
+                        "ReadElasticityObjects",
+                        "AssumePracticeTargetRole"
+                      ] | index($s.Sid // "")
+                    ) == null
+                    and
+                    (
+                      $s.Effect != "Allow"
+                      or
+                      (
+                        (
+                          if ($s.Action | type) == "array"
+                          then $s.Action
+                          else [$s.Action]
+                          end
+                        ) | map(ascii_downcase)
+                        | index("sts:assumerole")
+                      ) == null
+                      or
+                      (
+                        (
+                          if ($s.Resource | type) == "array"
+                          then $s.Resource
+                          else [$s.Resource]
+                          end
+                        ) | index($target)
+                      ) == null
+                    )
+                  )
+                | $s
+              ]
+              + $desired[0]
+              + [
+                  {
+                    "Sid": "AssumePracticeTargetRole",
+                    "Effect": "Allow",
+                    "Action": "sts:AssumeRole",
+                    "Resource": $target
+                  }
+                ]
+            )
+          ' existing-policy.json > updated-policy.json
+
+          echo "===== UPDATED POLICY ====="
+          jq . updated-policy.json
+
+          jq -e --arg target "$TARGET_ROLE_ARN" '
+            any(.Statement[];
+              .Sid == "AssumePracticeTargetRole" and
+              .Effect == "Allow" and
+              .Action == "sts:AssumeRole" and
+              .Resource == $target
+            )
+          ' updated-policy.json >/dev/null
+
+          echo "AssumeRole permission validated."
+
+      # 5. Apply source Glue inline policy
+      - name: Apply Updated Inline Policy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          aws iam put-role-policy \
+            --role-name "$ROLE_NAME" \
+            --policy-name "$POLICY_NAME" \
+            --policy-document file://updated-policy.json
+
+          echo "Updated inline policy on $ROLE_NAME."
+
+      # 6. Verify the saved source policy
+      - name: Verify Applied Permission
         shell: bash
         run: |
           set -euo pipefail
 
           aws iam get-role-policy \
-            --role-name "$GLUE_ROLE_NAME" \
-            --policy-name "$GLUE_POLICY_NAME" \
+            --role-name "$ROLE_NAME" \
+            --policy-name "$POLICY_NAME" \
             --query PolicyDocument \
-            --output json > glue-policy.json
+            --output json > applied-policy.json
 
-          jq --arg target "$REDSHIFT_ROLE_ARN" '
-            .Statement = (
-              (if (.Statement | type) == "array"
-               then .Statement else [.Statement] end)
-              | if any(.[];
-                  .Effect == "Allow" and
-                  (.Action == "sts:AssumeRole" or
-                   ((.Action | type) == "array" and
-                    (.Action | index("sts:AssumeRole")) != null)) and
-                  (.Resource == $target or
-                   ((.Resource | type) == "array" and
-                    (.Resource | index($target)) != null))
-                )
-                then .
-                else . + [{
-                  "Sid": "AllowAssumeNewRedshiftRole",
-                  "Effect": "Allow",
-                  "Action": "sts:AssumeRole",
-                  "Resource": $target
-                }]
-                end
+          jq -e --arg target "$TARGET_ROLE_ARN" '
+            any(.Statement[];
+              .Sid == "AssumePracticeTargetRole" and
+              .Effect == "Allow" and
+              .Action == "sts:AssumeRole" and
+              .Resource == $target
             )
-          ' glue-policy.json > updated-glue-policy.json
+          ' applied-policy.json >/dev/null
 
-          aws iam put-role-policy \
-            --role-name "$GLUE_ROLE_NAME" \
-            --policy-name "$GLUE_POLICY_NAME" \
-            --policy-document file://updated-glue-policy.json
+          echo "SUCCESS: Source AssumeRole permission verified."
 
-          echo "Glue policy updated; existing statements preserved."
-
-      # STEP 2: Attempt to assume the Redshift role with the same
-      # OIDC-authenticated identity. This requires existing trust
-      # and suitable permissions on the target role.
-      - name: Assume Redshift Role for Trust Update
+      # 7. Test cross-account AssumeRole using the source role
+      - name: Test Cross-Account AssumeRole
         shell: bash
         run: |
           set -euo pipefail
 
+          echo "Assuming source Glue role: $SOURCE_ROLE_ARN"
+
           CREDS=$(aws sts assume-role \
-            --role-arn "$REDSHIFT_ROLE_ARN" \
-            --role-session-name GitHubUpdateRedshiftTrust \
+            --role-arn "$SOURCE_ROLE_ARN" \
+            --role-session-name GitHubSourceGlueTest \
             --query Credentials \
             --output json)
 
@@ -108,72 +251,43 @@ jobs:
             echo "AWS_SESSION_TOKEN=$(echo "$CREDS" | jq -r '.SessionToken')"
           } >> "$GITHUB_ENV"
 
-      # STEP 3: Add Glue to the Redshift trust policy.
-      - name: Update Redshift Trust Policy
+      # 8. Use source Glue credentials to assume Hancy's target role
+      - name: Assume Hancy Target Role
         shell: bash
         run: |
           set -euo pipefail
 
-          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
-          test "$ACCOUNT" = "$TARGET_ACCOUNT_ID"
+          CREDS=$(aws sts assume-role \
+            --role-arn "$TARGET_ROLE_ARN" \
+            --role-session-name CrossAccountGlueTest \
+            --query Credentials \
+            --output json)
 
-          aws iam get-role \
-            --role-name "$REDSHIFT_ROLE_NAME" \
-            --query Role.AssumeRolePolicyDocument \
-            --output json > trust-policy.json
+          {
+            echo "AWS_ACCESS_KEY_ID=$(echo "$CREDS" | jq -r '.AccessKeyId')"
+            echo "AWS_SECRET_ACCESS_KEY=$(echo "$CREDS" | jq -r '.SecretAccessKey')"
+            echo "AWS_SESSION_TOKEN=$(echo "$CREDS" | jq -r '.SessionToken')"
+          } >> "$GITHUB_ENV"
 
-          jq --arg glue "$GLUE_ROLE_ARN" '
-            .Statement = (
-              (if (.Statement | type) == "array"
-               then .Statement else [.Statement] end)
-              | if any(.[];
-                  .Effect == "Allow" and
-                  (.Action == "sts:AssumeRole" or
-                   ((.Action | type) == "array" and
-                    (.Action | index("sts:AssumeRole")) != null)) and
-                  (.Principal.AWS == $glue or
-                   ((.Principal.AWS | type) == "array" and
-                    (.Principal.AWS | index($glue)) != null))
-                )
-                then .
-                else . + [{
-                  "Sid": "AllowProductionGlueJob",
-                  "Effect": "Allow",
-                  "Principal": {"AWS": $glue},
-                  "Action": "sts:AssumeRole"
-                }]
-                end
-            )
-          ' trust-policy.json > updated-trust-policy.json
+          echo "Cross-account AssumeRole succeeded."
 
-          aws iam update-assume-role-policy \
-            --role-name "$REDSHIFT_ROLE_NAME" \
-            --policy-document file://updated-trust-policy.json
-
-          echo "Redshift trust policy updated."
-
-      - name: Verify Redshift Trust
+      # 9. Verify the active identity is Hancy's target role
+      - name: Verify Target Role Identity
         shell: bash
         run: |
           set -euo pipefail
 
-          aws iam get-role \
-            --role-name "$REDSHIFT_ROLE_NAME" \
-            --query Role.AssumeRolePolicyDocument \
-            --output json > verified-trust.json
+          ACCOUNT=$(aws sts get-caller-identity \
+            --query Account --output text)
 
-          jq -e --arg glue "$GLUE_ROLE_ARN" '
-            any(
-              (if (.Statement | type) == "array"
-               then .Statement else [.Statement] end)[];
-              .Effect == "Allow" and
-              (.Action == "sts:AssumeRole" or
-               ((.Action | type) == "array" and
-                (.Action | index("sts:AssumeRole")) != null)) and
-              (.Principal.AWS == $glue or
-               ((.Principal.AWS | type) == "array" and
-                (.Principal.AWS | index($glue)) != null))
-            )
-          ' verified-trust.json > /dev/null
+          ARN=$(aws sts get-caller-identity \
+            --query Arn --output text)
 
-          echo "SUCCESS: Glue permission and Redshift trust verified."
+          if [ "$ACCOUNT" != "$TARGET_ACCOUNT_ID" ]; then
+            echo "ERROR: Expected target account $TARGET_ACCOUNT_ID, got $ACCOUNT"
+            exit 1
+          fi
+
+          echo "Verified target account: $ACCOUNT"
+          echo "Assumed role identity: $ARN"
+          echo "SUCCESS: Cross-account role assumption verified."
