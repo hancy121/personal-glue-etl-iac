@@ -1,4 +1,3 @@
-```yaml
 name: Update Personal Glue IAM Permissions
 
 "on":
@@ -309,4 +308,3 @@ jobs:
           esac
 
           echo "SUCCESS: Cross-account role assumption verified."
-```
