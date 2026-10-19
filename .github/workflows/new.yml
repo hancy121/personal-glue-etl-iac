@@ -1,13 +1,13 @@
 
-name: Update IAM Permissions (Non-Destructive)
+name: Configure Glue and Redshift Cross-Account Access
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - EA-Fleet-Analysis-Deploy-1
     paths:
       - ".github/workflows/update_iam_role_permissions.yml"
-  workflow_dispatch:
 
 permissions:
   id-token: write
@@ -15,17 +15,24 @@ permissions:
 
 env:
   AWS_REGION: us-east-2
-  SOURCE_ACCOUNT_ID: "654654263141"
-  ROLE_NAME: AmazonSageMakerServiceCatalogProductsGlueRole
-  POLICY_NAME: glue-job-inline-policy
-  NEW_REDSHIFT_ROLE_ARN: arn:aws:iam::604349250746:role/signet-role-Glue-To-Redshift
 
-  # Replace with the exact old role ARN to remove it.
-  # Leave as-is to preserve the old permission.
-  OLD_REDSHIFT_ROLE_ARN: REPLACE_WITH_OLD_ROLE_ARN
+  # Glue account
+  SOURCE_ACCOUNT_ID: "654654263141"
+  GLUE_ROLE_NAME: AmazonSageMakerServiceCatalogProductsGlueRole
+  GLUE_POLICY_NAME: glue-job-inline-policy
+  GLUE_ROLE_ARN: arn:aws:iam::654654263141:role/AmazonSageMakerServiceCatalogProductsGlueRole
+
+  # New Redshift role
+  TARGET_ACCOUNT_ID: "604349250746"
+  REDSHIFT_ROLE_NAME: signet-role-Glue-To-Redshift
+  REDSHIFT_ROLE_ARN: arn:aws:iam::604349250746:role/signet-role-Glue-To-Redshift
+
+  # Replace with a real deployment role in the target account.
+  TARGET_DEPLOYMENT_ROLE_ARN: REPLACE_WITH_TARGET_DEPLOYMENT_ROLE_ARN
 
 jobs:
-  update-role:
+  configure-cross-account-access:
+    name: Configure Both IAM Permissions
     environment: prod
     runs-on: ubuntu-latest
 
@@ -33,79 +40,46 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configure AWS Credentials
+      # STEP 1: Authenticate to the Glue account.
+      - name: Configure Source AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: <PROD_GITHUB_ACTIONS_OIDC_ROLE_ARN>
+          role-to-assume: arn:aws:iam::654654263141:role/signet-gha-eadse-oidc-role
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Verify AWS Identity
+      - name: Verify Source Account
         shell: bash
         run: |
           set -euo pipefail
 
           ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
-          echo "Authenticated account: $ACCOUNT"
-
-          if [[ "$ACCOUNT" != "$SOURCE_ACCOUNT_ID" ]]; then
-            echo "ERROR: Unexpected AWS account."
+          test "$ACCOUNT" = "$SOURCE_ACCOUNT_ID" || {
+            echo "ERROR: Unexpected source account: $ACCOUNT"
             exit 1
-          fi
+          }
 
-      - name: Fetch Existing Inline Policy
+      # STEP 2: Add sts:AssumeRole to the Glue identity policy.
+      # Existing S3, Lambda, and other permissions are preserved.
+      - name: Add Missing Glue AssumeRole Permission
         shell: bash
         run: |
           set -euo pipefail
 
           aws iam get-role-policy \
-            --role-name "$ROLE_NAME" \
-            --policy-name "$POLICY_NAME" \
+            --role-name "$GLUE_ROLE_NAME" \
+            --policy-name "$GLUE_POLICY_NAME" \
             --query PolicyDocument \
-            --output json > existing-policy.json
+            --output json > glue-policy.json
 
-      - name: Update Redshift Role Permission
-        shell: bash
-        run: |
-          set -euo pipefail
+          jq -e '
+            .Version == "2012-10-17" and
+            has("Statement")
+          ' glue-policy.json >/dev/null
 
-          jq \
-            --arg new "$NEW_REDSHIFT_ROLE_ARN" \
-            --arg old "$OLD_REDSHIFT_ROLE_ARN" '
+          jq --arg target "$REDSHIFT_ROLE_ARN" '
             .Statement = (
               (if (.Statement | type) == "array"
-               then .Statement
-               else [.Statement]
-               end)
-
-              | map(
-                  if (
-                    $old != "REPLACE_WITH_OLD_ROLE_ARN" and
-                    .Effect == "Allow" and
-                    (
-                      .Action == "sts:AssumeRole" or
-                      ((.Action | type) == "array" and
-                       (.Action | index("sts:AssumeRole")) != null)
-                    )
-                  )
-                  then
-                    if (.Resource | type) == "array" then
-                      .Resource = (
-                        [.Resource[] | select(. != $old)]
-                        + (if (.Resource | index($new)) != null
-                           then []
-                           else [$new]
-                           end)
-                      )
-                    elif .Resource == $old then
-                      .Resource = $new
-                    else
-                      .
-                    end
-                  else
-                    .
-                  end
-                )
-
+               then .Statement else [.Statement] end)
               | if any(.[];
                   .Effect == "Allow" and
                   (
@@ -114,50 +88,134 @@ jobs:
                      (.Action | index("sts:AssumeRole")) != null)
                   ) and
                   (
-                    .Resource == $new or
+                    .Resource == $target or
                     ((.Resource | type) == "array" and
-                     (.Resource | index($new)) != null)
+                     (.Resource | index($target)) != null)
                   )
                 )
                 then .
                 else . + [{
-                  "Sid": "AssumeNewRedshiftRole",
+                  "Sid": "AllowAssumeNewRedshiftRole",
                   "Effect": "Allow",
                   "Action": "sts:AssumeRole",
-                  "Resource": $new
+                  "Resource": $target
                 }]
                 end
             )
-          ' existing-policy.json > updated-policy.json
-
-          echo "Updated policy prepared."
+          ' glue-policy.json > updated-glue-policy.json
 
           aws iam put-role-policy \
-            --role-name "$ROLE_NAME" \
-            --policy-name "$POLICY_NAME" \
-            --policy-document file://updated-policy.json
+            --role-name "$GLUE_ROLE_NAME" \
+            --policy-name "$GLUE_POLICY_NAME" \
+            --policy-document file://updated-glue-policy.json
 
-      - name: Verify Updated Policy
+          echo "Glue identity policy updated."
+
+      # STEP 3: Switch to an authorized deployment role in the
+      # Redshift account. The source OIDC role must be allowed
+      # to assume this role.
+      - name: Configure Target Account Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.TARGET_DEPLOYMENT_ROLE_ARN }}
+          role-chaining: true
+          role-session-name: UpdateRedshiftTrust
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify Target Account
         shell: bash
         run: |
           set -euo pipefail
 
-          aws iam get-role-policy \
-            --role-name "$ROLE_NAME" \
-            --policy-name "$POLICY_NAME" \
-            --query PolicyDocument \
-            --output json > verified-policy.json
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          test "$ACCOUNT" = "$TARGET_ACCOUNT_ID" || {
+            echo "ERROR: Unexpected target account: $ACCOUNT"
+            exit 1
+          }
 
-          jq -e --arg role "$NEW_REDSHIFT_ROLE_ARN" '
+      # STEP 4: Add the Glue role to the Redshift trust policy.
+      # Existing trust statements are preserved.
+      - name: Fetch Existing Redshift Trust Policy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          aws iam get-role \
+            --role-name "$REDSHIFT_ROLE_NAME" \
+            --query Role.AssumeRolePolicyDocument \
+            --output json > redshift-trust.json
+
+          jq -e '
+            .Version == "2012-10-17" and
+            has("Statement")
+          ' redshift-trust.json >/dev/null
+
+      - name: Add Missing Glue Trust
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          jq --arg glue "$GLUE_ROLE_ARN" '
+            .Statement = (
+              (if (.Statement | type) == "array"
+               then .Statement else [.Statement] end)
+              | if any(.[];
+                  .Effect == "Allow" and
+                  (
+                    .Action == "sts:AssumeRole" or
+                    ((.Action | type) == "array" and
+                     (.Action | index("sts:AssumeRole")) != null)
+                  ) and
+                  (
+                    .Principal.AWS == $glue or
+                    ((.Principal.AWS | type) == "array" and
+                     (.Principal.AWS | index($glue)) != null)
+                  )
+                )
+                then .
+                else . + [{
+                  "Sid": "AllowProductionGlueJob",
+                  "Effect": "Allow",
+                  "Principal": {"AWS": $glue},
+                  "Action": "sts:AssumeRole"
+                }]
+                end
+            )
+          ' redshift-trust.json > updated-redshift-trust.json
+
+          aws iam update-assume-role-policy \
+            --role-name "$REDSHIFT_ROLE_NAME" \
+            --policy-document file://updated-redshift-trust.json
+
+          echo "Redshift trust policy updated."
+
+      # STEP 5: Verify the Redshift trust change.
+      - name: Verify Redshift Trust
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          aws iam get-role \
+            --role-name "$REDSHIFT_ROLE_NAME" \
+            --query Role.AssumeRolePolicyDocument \
+            --output json > verified-trust.json
+
+          jq -e --arg glue "$GLUE_ROLE_ARN" '
             any(
               (if (.Statement | type) == "array"
-               then .Statement
-               else [.Statement]
-               end)[];
+               then .Statement else [.Statement] end)[];
               .Effect == "Allow" and
-              .Action == "sts:AssumeRole" and
-              .Resource == $role
+              (
+                .Action == "sts:AssumeRole" or
+                ((.Action | type) == "array" and
+                 (.Action | index("sts:AssumeRole")) != null)
+              ) and
+              (
+                .Principal.AWS == $glue or
+                ((.Principal.AWS | type) == "array" and
+                 (.Principal.AWS | index($glue)) != null)
+              )
             )
-          ' verified-policy.json > /dev/null
+          ' verified-trust.json >/dev/null
 
-          echo "SUCCESS: Glue policy allows assuming the new Redshift role."
+          echo "SUCCESS: Both IAM changes have been applied."
