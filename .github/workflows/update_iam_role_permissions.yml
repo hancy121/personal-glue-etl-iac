@@ -14,24 +14,33 @@ permissions:
 
 env:
   AWS_REGION: us-east-1
+
+  # Aditya: source account
   ACCOUNT_ID: "493272324412"
   ROLE_NAME: practice-glue-role
   POLICY_NAME: glue-job-inline-policy
-  TARGET_ROLE_ARN: arn:aws:iam::493272324412:role/practice-redshift-s3-role
+
+  # Hancy: target account
+  TARGET_ACCOUNT_ID: "784656681846"
+  TARGET_ROLE_NAME: redshift-assumerole-test-target
+  TARGET_ROLE_ARN: arn:aws:iam::784656681846:role/redshift-assumerole-test-target
+
+  # Glue role that will assume the target role
+  SOURCE_ROLE_ARN: arn:aws:iam::493272324412:role/practice-glue-role
 
 jobs:
   update-role:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Authenticate to personal AWS
+      # 1. Authenticate to Aditya's AWS account using GitHub OIDC
       - name: Configure Personal AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::493272324412:role/github-ecr-role
           aws-region: us-east-1
 
-      # 2. Verify account
+      # 2. Verify source account
       - name: Verify AWS Identity
         shell: bash
         run: |
@@ -47,7 +56,7 @@ jobs:
 
           echo "Verified personal AWS account: $ACCOUNT"
 
-      # 3. Retrieve the existing inline policy
+      # 3. Retrieve the existing Glue inline policy
       - name: Fetch Existing Inline Policy
         shell: bash
         run: |
@@ -72,7 +81,7 @@ jobs:
               > existing-policy.json
           fi
 
-      # 4. Restore the required AssumeRole permission
+      # 4. Preserve existing permissions and add target AssumeRole permission
       - name: Build Updated Policy
         shell: bash
         run: |
@@ -113,9 +122,6 @@ jobs:
           ]
           JSON
 
-          # Remove previous workflow-managed statements and any
-          # direct AssumeRole Allow statement for the target.
-          # Preserve unrelated policy statements.
           jq --arg target "$TARGET_ROLE_ARN" \
              --slurpfile desired desired-permissions.json '
             .Statement = (
@@ -183,7 +189,7 @@ jobs:
 
           echo "AssumeRole permission validated."
 
-      # 5. Apply the updated policy
+      # 5. Apply the source Glue inline policy
       - name: Apply Updated Inline Policy
         shell: bash
         run: |
@@ -196,7 +202,7 @@ jobs:
 
           echo "Updated inline policy on $ROLE_NAME."
 
-      # 6. Verify the permission was saved
+      # 6. Verify the source policy
       - name: Verify Applied Permission
         shell: bash
         run: |
@@ -217,4 +223,123 @@ jobs:
             )
           ' applied-policy.json >/dev/null
 
-          echo "SUCCESS: AssumeRole permission restored and verified."
+          echo "SUCCESS: Source AssumeRole permission verified."
+
+      # 7. Stop before modifying the target account unless an authorized
+      # deployment role is explicitly configured.
+      - name: Check Target Account Deployment Configuration
+        shell: bash
+        env:
+          TARGET_DEPLOYMENT_ROLE_ARN: ${{ secrets.HANCY_DEPLOY_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${TARGET_DEPLOYMENT_ROLE_ARN:-}" ]; then
+            echo "::notice::Source policy is configured. Target trust policy was not modified."
+            echo "::notice::Configure HANCY_DEPLOY_ROLE_ARN after Hancy authorizes a deployment role."
+            exit 0
+          fi
+
+          echo "Target deployment role is configured."
+
+      # 8. Assume an authorized deployment role in Hancy's account.
+      # The role must already trust the GitHub OIDC role's AWS principal
+      # and permit IAM trust-policy updates for the target role.
+      - name: Assume Hancy Deployment Role
+        if: ${{ secrets.HANCY_DEPLOY_ROLE_ARN != '' }}
+        shell: bash
+        env:
+          TARGET_DEPLOYMENT_ROLE_ARN: ${{ secrets.HANCY_DEPLOY_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+
+          CREDS=$(aws sts assume-role \
+            --role-arn "$TARGET_DEPLOYMENT_ROLE_ARN" \
+            --role-session-name GitHubUpdateTargetTrust \
+            --query Credentials \
+            --output json)
+
+          {
+            echo "AWS_ACCESS_KEY_ID=$(echo "$CREDS" | jq -r '.AccessKeyId')"
+            echo "AWS_SECRET_ACCESS_KEY=$(echo "$CREDS" | jq -r '.SecretAccessKey')"
+            echo "AWS_SESSION_TOKEN=$(echo "$CREDS" | jq -r '.SessionToken')"
+          } >> "$GITHUB_ENV"
+
+      # 9. Update Hancy's target-role trust policy without removing
+      # existing trusted principals.
+      - name: Update Target Role Trust Policy
+        if: ${{ secrets.HANCY_DEPLOY_ROLE_ARN != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ACCOUNT=$(aws sts get-caller-identity \
+            --query Account --output text)
+
+          if [ "$ACCOUNT" != "$TARGET_ACCOUNT_ID" ]; then
+            echo "ERROR: Expected target account $TARGET_ACCOUNT_ID, got $ACCOUNT"
+            exit 1
+          fi
+
+          aws iam get-role \
+            --role-name "$TARGET_ROLE_NAME" \
+            --query Role.AssumeRolePolicyDocument \
+            --output json > trust-policy.json
+
+          jq --arg source "$SOURCE_ROLE_ARN" '
+            .Statement = (
+              (if (.Statement | type) == "array"
+               then .Statement else [.Statement] end)
+              | if any(.[];
+                  .Effect == "Allow" and
+                  (.Action == "sts:AssumeRole" or
+                   ((.Action | type) == "array" and
+                    (.Action | index("sts:AssumeRole")) != null)) and
+                  (.Principal.AWS == $source or
+                   ((.Principal.AWS | type) == "array" and
+                    (.Principal.AWS | index($source)) != null))
+                )
+                then .
+                else . + [{
+                  "Sid": "AllowPersonalGlueTestRole",
+                  "Effect": "Allow",
+                  "Principal": {"AWS": $source},
+                  "Action": "sts:AssumeRole"
+                }]
+                end
+            )
+          ' trust-policy.json > updated-trust-policy.json
+
+          aws iam update-assume-role-policy \
+            --role-name "$TARGET_ROLE_NAME" \
+            --policy-document file://updated-trust-policy.json
+
+          echo "Target trust policy updated."
+
+      # 10. Verify Hancy's target-role trust policy.
+      - name: Verify Target Role Trust
+        if: ${{ secrets.HANCY_DEPLOY_ROLE_ARN != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          aws iam get-role \
+            --role-name "$TARGET_ROLE_NAME" \
+            --query Role.AssumeRolePolicyDocument \
+            --output json > verified-trust.json
+
+          jq -e --arg source "$SOURCE_ROLE_ARN" '
+            any(
+              (if (.Statement | type) == "array"
+               then .Statement else [.Statement] end)[];
+              .Effect == "Allow" and
+              (.Action == "sts:AssumeRole" or
+               ((.Action | type) == "array" and
+                (.Action | index("sts:AssumeRole")) != null)) and
+              (.Principal.AWS == $source or
+               ((.Principal.AWS | type) == "array" and
+                (.Principal.AWS | index($source)) != null))
+            )
+          ' verified-trust.json >/dev/null
+
+          echo "SUCCESS: Target trust policy verified."
