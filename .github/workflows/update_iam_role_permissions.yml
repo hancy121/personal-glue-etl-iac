@@ -1,3 +1,4 @@
+```yaml
 name: Update Personal Glue IAM Permissions
 
 "on":
@@ -17,16 +18,14 @@ env:
 
   # Aditya: source account
   ACCOUNT_ID: "493272324412"
-  ROLE_NAME: practice-glue-role
+  ROLE_NAME: glue-assumerole-test-source
   POLICY_NAME: glue-job-inline-policy
+  SOURCE_ROLE_ARN: arn:aws:iam::493272324412:role/glue-assumerole-test-source
 
   # Hancy: target account
   TARGET_ACCOUNT_ID: "784656681846"
   TARGET_ROLE_NAME: redshift-assumerole-test-target
   TARGET_ROLE_ARN: arn:aws:iam::784656681846:role/redshift-assumerole-test-target
-
-  # Glue role that will assume the target role
-  SOURCE_ROLE_ARN: arn:aws:iam::493272324412:role/practice-glue-role
 
 jobs:
   update-role:
@@ -54,9 +53,9 @@ jobs:
             exit 1
           fi
 
-          echo "Verified personal AWS account: $ACCOUNT"
+          echo "Verified source account: $ACCOUNT"
 
-      # 3. Retrieve the existing Glue inline policy
+      # 3. Retrieve the existing inline policy safely
       - name: Fetch Existing Inline Policy
         shell: bash
         run: |
@@ -66,22 +65,37 @@ jobs:
             --role-name "$ROLE_NAME" \
             --policy-name "$POLICY_NAME" \
             --query PolicyDocument \
-            --output json > existing-policy.json 2>/dev/null; then
+            --output json \
+            > existing-policy.json 2>policy-error.txt; then
 
-            jq -e '
-              .Version == "2012-10-17" and
-              (.Statement | type == "array")
-            ' existing-policy.json >/dev/null
+            jq -e '.Version == "2012-10-17"' \
+              existing-policy.json >/dev/null
 
+            jq '
+              .Statement |= (
+                if type == "array" then .
+                else [.] end
+              )
+            ' existing-policy.json > normalized-policy.json
+
+            mv normalized-policy.json existing-policy.json
             echo "Existing inline policy retrieved."
-          else
-            echo "Inline policy not found; creating a new policy document."
+
+          elif grep -q "NoSuchEntity" policy-error.txt; then
+            echo "Inline policy does not exist; creating a new document."
+
             printf '%s\n' \
               '{"Version":"2012-10-17","Statement":[]}' \
               > existing-policy.json
+
+          else
+            cat policy-error.txt
+            echo "ERROR: Could not retrieve the inline policy."
+            echo "Check the GitHub OIDC role's IAM permissions."
+            exit 1
           fi
 
-      # 4. Preserve existing permissions and add target AssumeRole permission
+      # 4. Preserve unrelated statements and add the target permission
       - name: Build Updated Policy
         shell: bash
         run: |
@@ -122,8 +136,9 @@ jobs:
           ]
           JSON
 
-          jq --arg target "$TARGET_ROLE_ARN" \
-             --slurpfile desired desired-permissions.json '
+          jq \
+            --arg target "$TARGET_ROLE_ARN" \
+            --slurpfile desired desired-permissions.json '
             .Statement = (
               [
                 .Statement[] as $s
@@ -147,7 +162,8 @@ jobs:
                           then $s.Action
                           else [$s.Action]
                           end
-                        ) | map(ascii_downcase)
+                        )
+                        | map(ascii_downcase)
                         | index("sts:assumerole")
                       ) == null
                       or
@@ -187,9 +203,9 @@ jobs:
             )
           ' updated-policy.json >/dev/null
 
-          echo "AssumeRole permission validated."
+          echo "Target AssumeRole permission validated."
 
-      # 5. Apply the source Glue inline policy
+      # 5. Apply the inline policy to the source role
       - name: Apply Updated Inline Policy
         shell: bash
         run: |
@@ -202,7 +218,7 @@ jobs:
 
           echo "Updated inline policy on $ROLE_NAME."
 
-      # 6. Verify the source policy
+      # 6. Verify the source policy was saved
       - name: Verify Applied Permission
         shell: bash
         run: |
@@ -223,39 +239,17 @@ jobs:
             )
           ' applied-policy.json >/dev/null
 
-          echo "SUCCESS: Source AssumeRole permission verified."
+          echo "SUCCESS: Source role permission verified."
 
-      # 7. Stop before modifying the target account unless an authorized
-      # deployment role is explicitly configured.
-      - name: Check Target Account Deployment Configuration
+      # 7. Assume the source Glue role
+      - name: Assume Source Glue Role
         shell: bash
-        env:
-          TARGET_DEPLOYMENT_ROLE_ARN: ${{ secrets.HANCY_DEPLOY_ROLE_ARN }}
-        run: |
-          set -euo pipefail
-
-          if [ -z "${TARGET_DEPLOYMENT_ROLE_ARN:-}" ]; then
-            echo "::notice::Source policy is configured. Target trust policy was not modified."
-            echo "::notice::Configure HANCY_DEPLOY_ROLE_ARN after Hancy authorizes a deployment role."
-            exit 0
-          fi
-
-          echo "Target deployment role is configured."
-
-      # 8. Assume an authorized deployment role in Hancy's account.
-      # The role must already trust the GitHub OIDC role's AWS principal
-      # and permit IAM trust-policy updates for the target role.
-      - name: Assume Hancy Deployment Role
-        if: ${{ secrets.HANCY_DEPLOY_ROLE_ARN != '' }}
-        shell: bash
-        env:
-          TARGET_DEPLOYMENT_ROLE_ARN: ${{ secrets.HANCY_DEPLOY_ROLE_ARN }}
         run: |
           set -euo pipefail
 
           CREDS=$(aws sts assume-role \
-            --role-arn "$TARGET_DEPLOYMENT_ROLE_ARN" \
-            --role-session-name GitHubUpdateTargetTrust \
+            --role-arn "$SOURCE_ROLE_ARN" \
+            --role-session-name GitHubSourceGlueTest \
             --query Credentials \
             --output json)
 
@@ -265,10 +259,30 @@ jobs:
             echo "AWS_SESSION_TOKEN=$(echo "$CREDS" | jq -r '.SessionToken')"
           } >> "$GITHUB_ENV"
 
-      # 9. Update Hancy's target-role trust policy without removing
-      # existing trusted principals.
-      - name: Update Target Role Trust Policy
-        if: ${{ secrets.HANCY_DEPLOY_ROLE_ARN != '' }}
+          echo "Source Glue role assumed."
+
+      # 8. Assume Hancy's target role using source Glue credentials
+      - name: Test Cross-Account AssumeRole
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CREDS=$(aws sts assume-role \
+            --role-arn "$TARGET_ROLE_ARN" \
+            --role-session-name CrossAccountGlueTest \
+            --query Credentials \
+            --output json)
+
+          {
+            echo "AWS_ACCESS_KEY_ID=$(echo "$CREDS" | jq -r '.AccessKeyId')"
+            echo "AWS_SECRET_ACCESS_KEY=$(echo "$CREDS" | jq -r '.SecretAccessKey')"
+            echo "AWS_SESSION_TOKEN=$(echo "$CREDS" | jq -r '.SessionToken')"
+          } >> "$GITHUB_ENV"
+
+          echo "Cross-account AssumeRole succeeded."
+
+      # 9. Verify the final AWS identity is Hancy's target role
+      - name: Verify Target Role Identity
         shell: bash
         run: |
           set -euo pipefail
@@ -276,70 +290,23 @@ jobs:
           ACCOUNT=$(aws sts get-caller-identity \
             --query Account --output text)
 
+          ARN=$(aws sts get-caller-identity \
+            --query Arn --output text)
+
           if [ "$ACCOUNT" != "$TARGET_ACCOUNT_ID" ]; then
-            echo "ERROR: Expected target account $TARGET_ACCOUNT_ID, got $ACCOUNT"
+            echo "ERROR: Expected account $TARGET_ACCOUNT_ID, got $ACCOUNT"
             exit 1
           fi
 
-          aws iam get-role \
-            --role-name "$TARGET_ROLE_NAME" \
-            --query Role.AssumeRolePolicyDocument \
-            --output json > trust-policy.json
+          case "$ARN" in
+            arn:aws:sts::784656681846:assumed-role/redshift-assumerole-test-target/*)
+              echo "Verified target role: $ARN"
+              ;;
+            *)
+              echo "ERROR: Unexpected target identity: $ARN"
+              exit 1
+              ;;
+          esac
 
-          jq --arg source "$SOURCE_ROLE_ARN" '
-            .Statement = (
-              (if (.Statement | type) == "array"
-               then .Statement else [.Statement] end)
-              | if any(.[];
-                  .Effect == "Allow" and
-                  (.Action == "sts:AssumeRole" or
-                   ((.Action | type) == "array" and
-                    (.Action | index("sts:AssumeRole")) != null)) and
-                  (.Principal.AWS == $source or
-                   ((.Principal.AWS | type) == "array" and
-                    (.Principal.AWS | index($source)) != null))
-                )
-                then .
-                else . + [{
-                  "Sid": "AllowPersonalGlueTestRole",
-                  "Effect": "Allow",
-                  "Principal": {"AWS": $source},
-                  "Action": "sts:AssumeRole"
-                }]
-                end
-            )
-          ' trust-policy.json > updated-trust-policy.json
-
-          aws iam update-assume-role-policy \
-            --role-name "$TARGET_ROLE_NAME" \
-            --policy-document file://updated-trust-policy.json
-
-          echo "Target trust policy updated."
-
-      # 10. Verify Hancy's target-role trust policy.
-      - name: Verify Target Role Trust
-        if: ${{ secrets.HANCY_DEPLOY_ROLE_ARN != '' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          aws iam get-role \
-            --role-name "$TARGET_ROLE_NAME" \
-            --query Role.AssumeRolePolicyDocument \
-            --output json > verified-trust.json
-
-          jq -e --arg source "$SOURCE_ROLE_ARN" '
-            any(
-              (if (.Statement | type) == "array"
-               then .Statement else [.Statement] end)[];
-              .Effect == "Allow" and
-              (.Action == "sts:AssumeRole" or
-               ((.Action | type) == "array" and
-                (.Action | index("sts:AssumeRole")) != null)) and
-              (.Principal.AWS == $source or
-               ((.Principal.AWS | type) == "array" and
-                (.Principal.AWS | index($source)) != null))
-            )
-          ' verified-trust.json >/dev/null
-
-          echo "SUCCESS: Target trust policy verified."
+          echo "SUCCESS: Cross-account role assumption verified."
+```
