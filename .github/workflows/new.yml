@@ -1,0 +1,163 @@
+
+name: Update IAM Permissions (Non-Destructive)
+
+on:
+  push:
+    branches:
+      - EA-Fleet-Analysis-Deploy-1
+    paths:
+      - ".github/workflows/update_iam_role_permissions.yml"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-2
+  SOURCE_ACCOUNT_ID: "654654263141"
+  ROLE_NAME: AmazonSageMakerServiceCatalogProductsGlueRole
+  POLICY_NAME: glue-job-inline-policy
+  NEW_REDSHIFT_ROLE_ARN: arn:aws:iam::604349250746:role/signet-role-Glue-To-Redshift
+
+  # Replace with the exact old role ARN to remove it.
+  # Leave as-is to preserve the old permission.
+  OLD_REDSHIFT_ROLE_ARN: REPLACE_WITH_OLD_ROLE_ARN
+
+jobs:
+  update-role:
+    environment: prod
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: <PROD_GITHUB_ACTIONS_OIDC_ROLE_ARN>
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS Identity
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          echo "Authenticated account: $ACCOUNT"
+
+          if [[ "$ACCOUNT" != "$SOURCE_ACCOUNT_ID" ]]; then
+            echo "ERROR: Unexpected AWS account."
+            exit 1
+          fi
+
+      - name: Fetch Existing Inline Policy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          aws iam get-role-policy \
+            --role-name "$ROLE_NAME" \
+            --policy-name "$POLICY_NAME" \
+            --query PolicyDocument \
+            --output json > existing-policy.json
+
+      - name: Update Redshift Role Permission
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          jq \
+            --arg new "$NEW_REDSHIFT_ROLE_ARN" \
+            --arg old "$OLD_REDSHIFT_ROLE_ARN" '
+            .Statement = (
+              (if (.Statement | type) == "array"
+               then .Statement
+               else [.Statement]
+               end)
+
+              | map(
+                  if (
+                    $old != "REPLACE_WITH_OLD_ROLE_ARN" and
+                    .Effect == "Allow" and
+                    (
+                      .Action == "sts:AssumeRole" or
+                      ((.Action | type) == "array" and
+                       (.Action | index("sts:AssumeRole")) != null)
+                    )
+                  )
+                  then
+                    if (.Resource | type) == "array" then
+                      .Resource = (
+                        [.Resource[] | select(. != $old)]
+                        + (if (.Resource | index($new)) != null
+                           then []
+                           else [$new]
+                           end)
+                      )
+                    elif .Resource == $old then
+                      .Resource = $new
+                    else
+                      .
+                    end
+                  else
+                    .
+                  end
+                )
+
+              | if any(.[];
+                  .Effect == "Allow" and
+                  (
+                    .Action == "sts:AssumeRole" or
+                    ((.Action | type) == "array" and
+                     (.Action | index("sts:AssumeRole")) != null)
+                  ) and
+                  (
+                    .Resource == $new or
+                    ((.Resource | type) == "array" and
+                     (.Resource | index($new)) != null)
+                  )
+                )
+                then .
+                else . + [{
+                  "Sid": "AssumeNewRedshiftRole",
+                  "Effect": "Allow",
+                  "Action": "sts:AssumeRole",
+                  "Resource": $new
+                }]
+                end
+            )
+          ' existing-policy.json > updated-policy.json
+
+          echo "Updated policy prepared."
+
+          aws iam put-role-policy \
+            --role-name "$ROLE_NAME" \
+            --policy-name "$POLICY_NAME" \
+            --policy-document file://updated-policy.json
+
+      - name: Verify Updated Policy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          aws iam get-role-policy \
+            --role-name "$ROLE_NAME" \
+            --policy-name "$POLICY_NAME" \
+            --query PolicyDocument \
+            --output json > verified-policy.json
+
+          jq -e --arg role "$NEW_REDSHIFT_ROLE_ARN" '
+            any(
+              (if (.Statement | type) == "array"
+               then .Statement
+               else [.Statement]
+               end)[];
+              .Effect == "Allow" and
+              .Action == "sts:AssumeRole" and
+              .Resource == $role
+            )
+          ' verified-policy.json > /dev/null
+
+          echo "SUCCESS: Glue policy allows assuming the new Redshift role."
